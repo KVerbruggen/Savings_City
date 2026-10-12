@@ -27,18 +27,6 @@ const uuid = () =>
         return (c === 'x' ? r : (r & 3) | 8).toString(16)
       })
 
-const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString()
-
-/** Demo projects covering every footprint size and facade style. */
-function seedProjects(): Project[] {
-  return [
-    { id: uuid(), name: 'Invoice Autopilot', description: 'Automated invoice parsing and reconciliation scripts.', time_spent_ai: 6, time_estimated_no_ai: 30, budget_spent: 120, created_at: daysAgo(4) },
-    { id: uuid(), name: 'Crystal Dashboard', description: 'Analytics dashboard with live KPIs, built with AI pair programming.', time_spent_ai: 20, time_estimated_no_ai: 120, budget_spent: 6500, created_at: daysAgo(3) },
-    { id: uuid(), name: 'Legacy Migration', description: 'Enterprise migration of a legacy reporting system.', time_spent_ai: 90, time_estimated_no_ai: 240, budget_spent: 2200, created_at: daysAgo(2) },
-    { id: uuid(), name: 'Docs Refresh', description: 'Rewrite of the internal handbook.', time_spent_ai: 20, time_estimated_no_ai: 25, budget_spent: 40, created_at: daysAgo(1) },
-  ]
-}
-
 function read(): Project[] {
   try {
     const raw = localStorage.getItem(KEY)
@@ -46,15 +34,13 @@ function read(): Project[] {
   } catch {
     return []
   }
-  const seeded = seedProjects()
-  write(seeded)
-  return seeded
+  return []
 }
 function write(p: Project[]) {
   try { localStorage.setItem(KEY, JSON.stringify(p)) } catch { /* storage unavailable */ }
 }
 
-/** Local Storage implementation (default). Seeds demo data when empty on first load. */
+/** Local Storage implementation (default). A new city starts empty and grows from submitted projects. */
 export const localDataService: DataService = {
   async list() {
     return read().sort((a, b) => a.created_at.localeCompare(b.created_at))

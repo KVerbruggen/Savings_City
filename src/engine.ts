@@ -4,11 +4,22 @@ export const TILE_W = 64
 export const TILE_H = 32
 const PLOT_GAP = 1 // road width
 const VERTICAL_SCALE = 1.2
+let projectionAngle = 0
 
-export const toIso = (gx: number, gy: number) => ({
-  x: (gx - gy) * (TILE_W / 2),
-  y: (gx + gy) * (TILE_H / 2),
-})
+export const toIso = (gx: number, gy: number, angle = projectionAngle) => {
+  // Change the camera's compass direction in map space before projecting it.
+  // Rotating the already-projected screen point makes the wide isometric
+  // diamond tall at 90°, which is a canvas rotation rather than a new view.
+  const cos = Math.cos(angle), sin = Math.sin(angle)
+  const mapX = gx * cos - gy * sin
+  const mapY = gx * sin + gy * cos
+  const x = (mapX - mapY) * (TILE_W / 2)
+  const y = (mapX + mapY) * (TILE_H / 2)
+  return {
+    x,
+    y,
+  }
+}
 export const toGrid = (x: number, y: number) => ({
   gx: y / TILE_H + x / TILE_W,
   gy: y / TILE_H - x / TILE_W,
@@ -43,7 +54,7 @@ export interface Placed {
   duration: number // ms
 }
 
-export function layout(projects: Project[]): Placed[] {
+export function layout(projects: Project[], constructionStarts = new Map<string, number>()): Placed[] {
   return projects.map((p, i) => {
     const [cx, cy] = spiralCell(i)
     const size = footprint(p)
@@ -52,7 +63,9 @@ export function layout(projects: Project[]): Placed[] {
       p, size,
       gx: cx * STRIDE + off,
       gy: cy * STRIDE + off,
-      start: i * 900,
+      // Projects loaded together start together. A newly submitted project can
+      // provide its own elapsed start time without shifting older buildings.
+      start: constructionStarts.get(p.id) ?? 0,
       duration: 3000 + Math.min(p.time_estimated_no_ai, 300) * 15,
     }
   })
@@ -84,28 +97,41 @@ function box(ctx: Ctx, gx: number, gy: number, w: number, h: number, height: num
   const z0 = opts.z0 ?? 0
   const top = z0 + height
   const A = toIso(gx, gy), B = toIso(gx + w, gy), C = toIso(gx + w, gy + h), D = toIso(gx, gy + h)
+  const corners = [A, B, C, D]
+  // The two walls that meet at the nearest projected corner are visible. This
+  // changes with each compass direction; keeping C fixed only worked in the
+  // initial north-facing view.
+  const nearest = corners.reduce((best, corner, index) => corner.y > corners[best].y ? index : best, 0)
+  const previous = corners[(nearest + 3) % 4]
+  const current = corners[nearest]
+  const next = corners[(nearest + 1) % 4]
+  const face = (from: typeof A, to: typeof A, fill: string) =>
+    poly(ctx, [[from.x, from.y - z0], [to.x, to.y - z0], [to.x, to.y - top], [from.x, from.y - top]], fill)
   ctx.save()
   if (opts.alpha !== undefined) ctx.globalAlpha = opts.alpha
-  // left face (D-C), right face (C-B)
-  poly(ctx, [[D.x, D.y - z0], [C.x, C.y - z0], [C.x, C.y - top], [D.x, D.y - top]], shade(color, 0.75))
-  poly(ctx, [[C.x, C.y - z0], [B.x, B.y - z0], [B.x, B.y - top], [C.x, C.y - top]], shade(color, 0.55))
-  poly(ctx, [[A.x, A.y - top], [B.x, B.y - top], [C.x, C.y - top], [D.x, D.y - top]], shade(color, 1.1))
+  face(previous, current, shade(color, 0.75))
+  face(current, next, shade(color, 0.55))
   if (opts.windows && height > 12) {
     ctx.fillStyle = opts.windows
     const rows = Math.floor(height / 12)
     const cols = Math.max(1, Math.round(w * 2))
-    for (let r = 0; r < rows; r++) {
-      for (let k = 0; k < cols; k++) {
-        const t = (k + 0.3) / cols
-        // left face
-        let x = D.x + (C.x - D.x) * t, y = D.y + (C.y - D.y) * t - z0 - 5 - r * 12
-        poly(ctx, [[x, y], [x + 5, y + 2.5], [x + 5, y - 4], [x, y - 6.5]], opts.windows)
-        // right face
-        x = C.x + (B.x - C.x) * t; y = C.y + (B.y - C.y) * t - z0 - 5 - r * 12
-        poly(ctx, [[x, y], [x + 5, y - 2.5], [x + 5, y - 9], [x, y - 6.5]], shade(opts.windows, 0.8))
+    const drawWindows = (from: typeof A, to: typeof A, tint: string) => {
+      const dx = to.x - from.x, dy = to.y - from.y
+      const length = Math.hypot(dx, dy)
+      const wx = dx / length * 5, wy = dy / length * 5
+      for (let r = 0; r < rows; r++) {
+        for (let k = 0; k < cols; k++) {
+          const t = (k + 0.3) / cols
+          const x = from.x + dx * t, y = from.y + dy * t - z0 - 5 - r * 12
+          poly(ctx, [[x, y], [x + wx, y + wy], [x + wx, y + wy - 6.5], [x, y - 6.5]], tint)
+        }
       }
     }
+    drawWindows(previous, current, opts.windows)
+    drawWindows(current, next, shade(opts.windows, 0.8))
   }
+  // Draw the roof after facade details so it masks the wall at its top edge.
+  poly(ctx, [[A.x, A.y - top], [B.x, B.y - top], [C.x, C.y - top], [D.x, D.y - top]], shade(color, 1.1))
   ctx.restore()
 }
 
@@ -130,6 +156,8 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const win = rich ? '#ffe36b' : style === 'glass' ? '#d8f4ff' : '#f3e2b0'
   const m = 0.12
   box(ctx, gx + m, gy + m, size - 2 * m, size - 2 * m, h, color, { windows: win })
+  // Put bands on the facade before the roof so they cannot paint over its lower half.
+  if (mid || rich) box(ctx, gx + 0.04, gy + 0.04, size - 0.08, size - 0.08, 3, '#e6b422', { z0: Math.max(0, h - 3) })
   if (style === 'glass') {
     // crystal tapered crown
     box(ctx, gx + size * 0.3, gy + size * 0.3, size * 0.4, size * 0.4, 14, '#9fe3ff', { z0: h })
@@ -139,10 +167,6 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
     box(ctx, gx + size * 0.25, gy + size * 0.25, size * 0.5, size * 0.5, 8, '#8d867a', { z0: h })
   }
   const c = toIso(gx + size / 2, gy + size / 2)
-  if (mid || rich) {
-    // gold trim band
-    box(ctx, gx + 0.04, gy + 0.04, size - 0.08, size - 0.08, 3, '#e6b422', { z0: h * 0.5 })
-  }
   if (rich) {
     // helipad
     const top = h + (style === 'brick' ? 4 : style === 'glass' ? 14 : 8)
@@ -225,13 +249,22 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
 }
 
-export interface Traffic { t: number; speed: number; road: number; color: string; dir: 1 | -1 }
+export interface Traffic {
+  position: number
+  speed: number
+  baseSpeed: number
+  road: number
+  horizontal: boolean
+  color: string
+  dir: 1 | -1
+  lastTime: number
+}
 
-export interface Camera { x: number; y: number; zoom: number }
+export interface Camera { x: number; y: number; zoom: number; angle: number }
 
 export interface RenderState {
   placed: Placed[]
-  elapsed: number // ms since replay start (for staggered growth)
+  elapsed: number // retained for the rendering/picking API
   time: number
   cam: Camera
   selected?: string
@@ -239,16 +272,29 @@ export interface RenderState {
 }
 
 export const progressOf = (b: Placed, elapsed: number) =>
-  Math.max(0, Math.min(1, (elapsed - b.start) / b.duration))
+  b.duration <= 0 ? 1 : Math.max(0, Math.min(1, (elapsed - b.start) / b.duration))
 
-export const carCountFor = (n: number) => (n < 2 ? 0 : Math.min(60, n * 4))
+function viewDepth(b: Placed, angle: number) {
+  const c = toIso(b.gx + b.size / 2, b.gy + b.size / 2, angle)
+  // The projected vertical axis determines which footprint is farther away.
+  return c.y + b.size
+}
 
-export function makeCars(n: number): Traffic[] {
-  const count = carCountFor(n)
+export const carCountFor = (n: number) => (n < 1 ? 0 : Math.min(60, n * 4))
+
+export function makeCars(placed: Placed[]): Traffic[] {
+  const count = carCountFor(placed.length)
   const colors = ['#ef4444', '#3b82f6', '#facc15', '#ffffff', '#22c55e']
+  const roads = [...new Set(placed.flatMap((b) => {
+    const cx = Math.round(b.gx / STRIDE), cy = Math.round(b.gy / STRIDE)
+    return [{ road: cx, horizontal: true }, { road: cy, horizontal: false }]
+  }).map((r) => `${r.horizontal ? 'h' : 'v'}${r.road}`))]
   return Array.from({ length: count }, (_, i) => ({
-    t: Math.random(), speed: 0.04 + Math.random() * 0.06, road: i, color: colors[i % 5],
-    dir: Math.random() < 0.5 ? 1 : -1,
+    position: (i % Math.max(1, Math.ceil(count / Math.max(1, roads.length)))) * 0.16,
+    speed: 0.04 + (i % 4) * 0.012, baseSpeed: 0.04 + (i % 4) * 0.012,
+    road: roads.length ? Number(roads[i % roads.length].slice(1)) : 0,
+    horizontal: roads.length ? roads[i % roads.length][0] === 'h' : true,
+    color: colors[i % 5], dir: i % 2 ? -1 : 1, lastTime: 0,
   }))
 }
 
@@ -259,10 +305,11 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   ctx.fillStyle = g; ctx.fillRect(0, 0, w, h)
   ctx.translate(w / 2 + s.cam.x, h / 2 + s.cam.y)
   ctx.scale(s.cam.zoom, s.cam.zoom)
+  projectionAngle = s.cam.angle
 
   // Ground: rings of cells, roads between
-  const n = s.placed.length
-  const ring = Math.max(1, Math.ceil((Math.sqrt(n + 1) - 1) / 2)) + 1
+  const extent = s.placed.reduce((m, b) => Math.max(m, Math.abs(Math.round(b.gx / STRIDE)), Math.abs(Math.round(b.gy / STRIDE))), 0)
+  const ring = Math.max(1, extent + 1)
   const lo = -ring * STRIDE - 1, hi = ring * STRIDE + CELL + 1
   diamond(ctx, lo, lo, hi - lo, hi - lo, 0, '#7fb069')
   for (let cy = -ring; cy <= ring; cy++) for (let cx = -ring; cx <= ring; cx++) {
@@ -276,11 +323,24 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   }
   // traffic (drawn on roads before buildings)
   const span = hi - lo
-  s.cars.forEach((car) => {
-    const horizontal = car.road % 2 === 0
-    const k = (Math.floor(car.road / 2) % (2 * ring + 2)) - ring
+  // Advance each lane as a small circular queue. Cars use the roads adjacent to
+  // occupied blocks and reduce their speed when another car is too close ahead.
+  const previous = s.cars.map((car) => car.position)
+  s.cars.forEach((car, index) => {
+    const dt = car.lastTime ? Math.min(80, s.time - car.lastTime) / 1000 : 0
+    const sameLane = s.cars.filter((other, j) => j !== index && other.road === car.road && other.horizontal === car.horizontal && other.dir === car.dir)
+    const ahead = Math.min(...sameLane.map((other) => {
+      const otherIndex = s.cars.indexOf(other)
+      return ((previous[otherIndex] - previous[index]) * car.dir + 1) % 1
+    }), 1)
+    const gap = ahead
+    car.speed = gap < 0.1 ? 0 : Math.min(car.baseSpeed, car.baseSpeed * Math.max(0.25, (gap - 0.06) / 0.12))
+    car.position = (car.position + dt * car.speed * car.dir + 1) % 1
+    car.lastTime = s.time
+    const horizontal = car.horizontal
+    const k = car.road
     const lane = k * STRIDE - PLOT_GAP + (car.dir === 1 ? 0.3 : 0.65)
-    const pos = lo + (((car.t + (s.time / 1000) * car.speed * car.dir) % 1) + 1) % 1 * span
+    const pos = lo + car.position * span
     const [gx, gy] = horizontal ? [pos, lane] : [lane, pos]
     const q = toIso(gx, gy)
     ctx.fillStyle = car.color
@@ -288,7 +348,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   })
 
   // depth-sorted buildings
-  const order = [...s.placed].sort((a, b) => a.gx + a.gy + a.size - (b.gx + b.gy + b.size) || a.gx - b.gx)
+  const order = [...s.placed].sort((a, b) => viewDepth(a, s.cam.angle) - viewDepth(b, s.cam.angle) || a.gx - b.gx)
   for (const b of order) {
     const prog = progressOf(b, s.elapsed)
     if (prog <= 0) continue
@@ -303,14 +363,20 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
 
 /** Find the building whose footprint contains the screen point. */
 export function pick(placed: Placed[], elapsed: number, sx: number, sy: number, w: number, h: number, cam: Camera): Placed | undefined {
-  const x = (sx - w / 2 - cam.x) / cam.zoom, y = (sy - h / 2 - cam.y) / cam.zoom
-  const order = [...placed].sort((a, b) => b.gx + b.gy - (a.gx + a.gy))
+  const screenX = (sx - w / 2 - cam.x) / cam.zoom
+  const screenY = (sy - h / 2 - cam.y) / cam.zoom
+  const cos = Math.cos(cam.angle), sin = Math.sin(cam.angle)
+  const order = [...placed].sort((a, b) => viewDepth(b, cam.angle) - viewDepth(a, cam.angle))
   for (const b of order) {
     if (progressOf(b, elapsed) < 1) continue
     const fh = finalHeight(b.p)
     // test against the footprint, shifted down by heights up to the roof
     for (let z = 0; z <= fh + 14; z += 6) {
-      const { gx, gy } = toGrid(x, y + z)
+      // Convert the projected point into rotated map space, then undo the
+      // camera's compass rotation. Building height is always screen-vertical.
+      const rotated = toGrid(screenX, screenY + z)
+      const gx = rotated.gx * cos + rotated.gy * sin
+      const gy = -rotated.gx * sin + rotated.gy * cos
       if (gx >= b.gx && gx <= b.gx + b.size && gy >= b.gy && gy <= b.gy + b.size) return b
     }
   }
@@ -318,7 +384,12 @@ export function pick(placed: Placed[], elapsed: number, sx: number, sy: number, 
 }
 
 export const centerOn = (b: Placed): Camera => {
-  const c = toIso(b.gx + b.size / 2, b.gy + b.size / 2)
+  // centerOn returns to the default north-facing view, so use unrotated map
+  // coordinates rather than the projection from the last rendered frame.
+  const c = {
+    x: ((b.gx + b.size / 2) - (b.gy + b.size / 2)) * (TILE_W / 2),
+    y: ((b.gx + b.size / 2) + (b.gy + b.size / 2)) * (TILE_H / 2),
+  }
   const zoom = 1.2
-  return { x: -c.x * zoom, y: (-c.y + finalHeight(b.p) / 2) * zoom, zoom }
+  return { x: -c.x * zoom, y: (-c.y + finalHeight(b.p) / 2) * zoom, zoom, angle: 0 }
 }
