@@ -1,4 +1,4 @@
-import { type Project, timeSaved, timeSavingsRatio } from './data_service'
+import { type Project, timeSaved, timeSavingsRatio } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
