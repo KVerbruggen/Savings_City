@@ -1,4 +1,4 @@
-import { type Project, timeSaved, timeSavingsRatio } from './services/storageService'
+import { type Project, timeSaved } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
@@ -304,8 +304,9 @@ function diamond(ctx: Ctx, gx: number, gy: number, w: number, h: number, z: numb
 }
 
 /** Extruded box on map-space corners A,B,C,D (in order). */
-function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: string, opts: { windows?: string; z0?: number; alpha?: number } = {}) {
+function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: string, opts: { windows?: string; z0?: number; alpha?: number; windowScale?: number; noWindowsOn?: [V2, V2][] } = {}) {
   const z0 = opts.z0 ?? 0
+  const ws = opts.windowScale ?? 1
   const top = z0 + height
   const mapCorners = [A, B, C, D]
   const corners = mapCorners.map((p) => toIso(p[0], p[1]))
@@ -333,9 +334,10 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
   if (opts.alpha !== undefined) ctx.globalAlpha = opts.alpha
   face(previous, current, shade(color, lightPrev))
   face(current, next, shade(color, lightNext))
-  if (opts.windows && height > 12) {
+  if (opts.windows && height >= 8) {
     ctx.fillStyle = opts.windows
-    const rows = Math.floor(height / 12)
+    const rows = Math.max(1, Math.floor(height / 12))
+    const base = Math.min(5, (height - 6.5 * ws) / 2)
     const drawWindows = (from: typeof current, to: typeof current, mapLen: number, tint: string) => {
       const dx = to.x - from.x, dy = to.y - from.y
       const length = Math.hypot(dx, dy)
@@ -343,15 +345,18 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
       const cols = Math.max(1, Math.round(mapLen * 2))
       for (let r = 0; r < rows; r++) {
         for (let k = 0; k < cols; k++) {
-          const t = (k + 0.3) / cols
-          const x = from.x + dx * t, y = from.y + dy * t - z0 - 5 - r * 12
-          poly(ctx, [[x, y], [x + wx, y + wy], [x + wx, y + wy - 6.5], [x, y - 6.5]], tint)
+          const t = ws < 1 ? (dx >= 0 ? 0.42 : 0.58) - 2.5 / length : (k + 0.3) / cols
+          const x = from.x + dx * t, y = from.y + dy * t - z0 - base - r * 12
+          poly(ctx, [[x, y], [x + wx, y + wy], [x + wx, y + wy - 6.5 * ws], [x, y - 6.5 * ws]], tint)
         }
       }
     }
     const prevBrighter = lightPrev >= lightNext
-    drawWindows(previous, current, dist(mapCorners[pi], mapCorners[nearest]), prevBrighter ? opts.windows : shade(opts.windows, 0.8))
-    drawWindows(current, next, dist(mapCorners[nearest], mapCorners[ni]), prevBrighter ? shade(opts.windows, 0.8) : opts.windows)
+    const isDoorWall = (i: number, j: number) => !!opts.noWindowsOn?.some((w) =>
+      [[i, j], [j, i]].some(([a, c]) => mapCorners[a][0] === w[0][0] && mapCorners[a][1] === w[0][1] &&
+        mapCorners[c][0] === w[1][0] && mapCorners[c][1] === w[1][1]))
+    if (!isDoorWall(pi, nearest)) drawWindows(previous, current, dist(mapCorners[pi], mapCorners[nearest]), prevBrighter ? opts.windows : shade(opts.windows, 0.8))
+    if (!isDoorWall(nearest, ni)) drawWindows(current, next, dist(mapCorners[nearest], mapCorners[ni]), prevBrighter ? shade(opts.windows, 0.8) : opts.windows)
   }
   // Draw the roof after facade details so it masks the wall at its top edge.
   poly(ctx, corners.map((q) => [q.x, q.y - top] as [number, number]), shade(color, 1.1))
@@ -363,7 +368,7 @@ type Frame = (a: number, b: number) => V2
 const frameOf = (b: { gx: number; gy: number }): Frame => (x, y) => [b.gx + x, b.gy + y]
 
 /** Box in a local frame: a in [x, x+w], b in [y, y+h]. */
-function boxAt(ctx: Ctx, at: Frame, x: number, y: number, w: number, h: number, height: number, color: string, opts: { windows?: string; z0?: number; alpha?: number } = {}) {
+function boxAt(ctx: Ctx, at: Frame, x: number, y: number, w: number, h: number, height: number, color: string, opts: { windows?: string; z0?: number; alpha?: number; windowScale?: number; noWindowsOn?: [V2, V2][] } = {}) {
   prism(ctx, at(x, y), at(x + w, y), at(x + w, y + h), at(x, y + h), height, color, opts)
 }
 
@@ -377,30 +382,38 @@ const NORMALS: V2[] = [[0, -1], [1, 0], [0, 1], [-1, 0]]
 
 /** Door on the front wall of the box inset by m from the footprint, drawn
  * only while that wall faces the camera. */
-function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing, m: number, z0 = 0, alpha = 1) {
+function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing, m: number, z0 = 0, alpha = 1, win?: string) {
   const n = NORMALS[facing]
   if (toIso(n[0], n[1]).y <= 0.01) return
-  const c: V2 = facing === 0 ? [gx + size / 2, gy + m]
+  let c: V2 = facing === 0 ? [gx + size / 2, gy + m]
     : facing === 1 ? [gx + size - m, gy + size / 2]
       : facing === 2 ? [gx + size / 2, gy + size - m]
         : [gx + m, gy + size / 2]
-  const t: V2 = n[0] === 0 ? [1, 0] : [0, 1]
+  let t: V2 = n[0] === 0 ? [1, 0] : [0, 1]
+  if (win) {
+    // Thin door left of centre, window to its right as seen on screen.
+    if (toIso(t[0], t[1]).x < 0) t = mul(t, -1)
+    const wc = add(c, mul(t, 0.1)), ww = 0.06
+    c = sub(c, mul(t, 0.08))
+    const p1 = toIso(...sub(wc, mul(t, ww))), p2 = toIso(...add(wc, mul(t, ww)))
+    const y0 = z0 + 3.5, y1 = y0 + 4.9
+    ctx.save()
+    ctx.globalAlpha = alpha
+    poly(ctx, [[p1.x, p1.y - y0], [p2.x, p2.y - y0], [p2.x, p2.y - y1], [p1.x, p1.y - y1]], win)
+    ctx.restore()
+  }
+  const dw = win ? 0.5 : 1
   const quad = (hw: number, hgt: number, fill: string) => {
     const p1 = toIso(...sub(c, mul(t, hw))), p2 = toIso(...add(c, mul(t, hw)))
     poly(ctx, [[p1.x, p1.y - z0], [p2.x, p2.y - z0], [p2.x, p2.y - z0 - hgt], [p1.x, p1.y - z0 - hgt]], fill)
   }
   ctx.save()
   ctx.globalAlpha = alpha
-  quad(0.17, 8, '#e8d5b0')
-  quad(0.13, 7, '#4a2f1b')
+  quad(0.17 * dw, 8, '#e8d5b0')
+  quad(0.13 * dw, 7, '#4a2f1b')
   ctx.restore()
 }
 
-export type Style = 'glass' | 'mixed' | 'brick'
-export const styleOf = (p: Project): Style => {
-  const r = timeSavingsRatio(p)
-  return r > 0.7 ? 'glass' : r < 0.3 ? 'brick' : 'mixed'
-}
 export const finalHeight = (p: Project) => {
   const hours = Math.max(0, timeSaved(p))
   const floors = MAX_FLOORS * (1 - Math.exp(-Math.pow(hours / FLOOR_CURVE_HOURS, FLOOR_CURVE_POWER)))
@@ -461,28 +474,40 @@ function drawSign(ctx: Ctx, A: V2, B: V2, outward: V2, z: number, name: string, 
 function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const { p, size } = b
   const at = frameOf(b)
-  const style = styleOf(p)
   const rich = p.budget_spent > 5000, mid = p.budget_spent > 1500
   const color = randomColor(p.id)
-  const win = rich ? '#ffe36b' : style === 'glass' ? '#d8f4ff' : '#f3e2b0'
+  const win = rich ? '#ffe36b' : '#d8f4ff'
   const m = BUILDING_MARGIN
   const inner = size - 2 * m
-  boxAt(ctx, at, m, m, inner, inner, h, color, { windows: win })
-  drawDoor(ctx, b.gx, b.gy, size, b.facing, m)
   const wall: [V2, V2][] = [[at(m, m), at(size - m, m)], [at(size - m, m), at(size - m, size - m)], [at(m, size - m), at(size - m, size - m)], [at(m, m), at(m, size - m)]]
-  if (size > 1) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h + (style === 'brick' ? 4 : 0), p.name, '#e6b422')
+  boxAt(ctx, at, m, m, inner, inner, h, color, { windows: win, windowScale: size === 1 ? 0.75 : 1, noWindowsOn: size === 1 ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
+  drawDoor(ctx, b.gx, b.gy, size, b.facing, m, 0, 1, size === 1 ? win : undefined)
+  if (size > 1) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
   // Put bands on the facade before the roof so they cannot paint over its lower half.
   if (mid || rich) boxAt(ctx, at, m - 0.03, m - 0.03, inner + 0.06, inner + 0.06, 3, '#e6b422', { z0: Math.max(0, h - 3) })
-  if (style === 'glass') {
-    // crystal tapered crown
-    boxAt(ctx, at, m + inner * 0.3, m + inner * 0.3, inner * 0.4, inner * 0.4, 14, '#9fe3ff', { z0: h })
-  } else if (style === 'brick') {
-    boxAt(ctx, at, m - 0.02, m - 0.02, inner + 0.04, inner + 0.04, 4, '#7a3524', { z0: h }) // cornice
-  } else {
-    boxAt(ctx, at, m + inner * 0.25, m + inner * 0.25, inner * 0.5, inner * 0.5, 8, '#8d867a', { z0: h })
+  const roofH = size === 1 ? 8 : size === 2 ? 0 : 14
+  if (size === 1) {
+    const roofColor = '#9fe3ff'
+    const pts = [at(m, m), at(size - m, m), at(size - m, size - m), at(m, size - m)].map((q) => toIso(q[0], q[1]))
+    const near = pts.reduce((best, q, i) => q.y > pts[best].y ? i : best, 0)
+    const apex = toIso(...at(size / 2, size / 2))
+    const apexY = apex.y - h - roofH
+    const tri = (i: number, j: number, f: number) =>
+      poly(ctx, [[pts[i].x, pts[i].y - h], [pts[j].x, pts[j].y - h], [apex.x, apexY]], shade(roofColor, f))
+    tri((near + 3) % 4, near, 0.9)
+    tri(near, (near + 1) % 4, 1.05)
+  } else if (size === 3) {
+    // roof block in the back-right corner as seen from outside the door
+    const n = NORMALS[b.facing]
+    const back: V2 = [-n[0], -n[1]], right: V2 = [n[1], -n[0]]
+    const w = inner * 0.4, off = inner * 0.3
+    const cx = size / 2 + (back[0] + right[0]) * off
+    const cy = size / 2 + (back[1] + right[1]) * off
+    const roofColor = '#9fe3ff'
+    boxAt(ctx, at, cx - w / 2, cy - w / 2, w, w, roofH, roofColor, { z0: h })
   }
   const c = toIso(...at(size / 2, size / 2))
-  const top = h + (style === 'brick' ? 4 : style === 'glass' ? 14 : 8)
+  const top = size === 1 ? h + roofH : h
   if (rich) {
     // helipad
     ctx.beginPath()
@@ -499,10 +524,22 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   }
 }
 
-function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
+/** Crane base position relative to the site origin; deliberately not on the diagonal. */
+const craneBase = (size: number): V2 => [-0.42, BUILDING_MARGIN - 0.3 + (size - 2 * BUILDING_MARGIN) * 0.25]
+
+function craneDepth(b: Placed, angle: number) {
+  const [cx, cy] = craneBase(b.size)
+  return toIso(b.gx + cx, b.gy + cy, angle).y
+}
+
+function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number, part: 'site' | 'crane') {
   const { size } = b
   const at = frameOf(b)
   const iso = (a: number, c: number) => toIso(...at(a, c))
+  if (part === 'crane') {
+    drawCrane(ctx, b, prog, h, time)
+    return
+  }
   // slab
   const edge = BUILDING_MARGIN
   boxAt(ctx, at, edge, edge, size - 2 * edge, size - 2 * edge, 2, '#9a9a9a')
@@ -535,25 +572,47 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
     for (let z = 8; z < sh; z += 10) line(ctx, [[a.x, a.y - z], [c.x, c.y - z]], '#e8c547')
     line(ctx, [[a.x, a.y - 2], [c.x, c.y - sh]], '#c9a227', 0.8)
   }
-  // crane
-  const base = iso(-0.35, -0.35)
+}
+
+function drawProgressBar(ctx: Ctx, b: Placed, prog: number) {
+  const { size } = b
+  const lb = toIso(b.gx + size / 2, b.gy + size / 2)
+  ctx.fillStyle = '#0006'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40, 5)
+  ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
+}
+
+function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
+  const { size } = b
+  const at = frameOf(b)
+  const iso = (a: number, c: number) => toIso(...at(a, c))
+  const top = 2 + Math.max(2, h * prog)
+  const [CRANE_X, CRANE_Y] = craneBase(size)
+  const base = iso(CRANE_X, CRANE_Y)
   const mast = Math.max(h, 30) + 40
   const bx = base.x, by = base.y - 2
-  boxAt(ctx, at, -0.6, -0.6, 0.5, 0.5, 4, '#777')
-  line(ctx, [[bx - 3, by], [bx - 3, by - mast]], '#f2a900', 2)
-  line(ctx, [[bx + 3, by], [bx + 3, by - mast]], '#f2a900', 2)
-  for (let z = 0; z < mast; z += 10) line(ctx, [[bx - 3, by - z], [bx + 3, by - z - 10]], '#f2a900', 1)
-  // jib overhangs the building toward the centre
-  const tip = { x: bx + (iso(size / 2, size / 2).x - bx) * 1.5 + 14, y: by - mast + 0 }
+  boxAt(ctx, at, CRANE_X - 0.3, CRANE_Y - 0.3, 0.6, 0.6, 1, '#444')
+  boxAt(ctx, at, CRANE_X - 0.25, CRANE_Y - 0.25, 0.5, 0.5, 4, '#777', { z0: 1 })
+  const drawMast = () => {
+    line(ctx, [[bx - 3, by], [bx - 3, by - mast]], '#f2a900', 2)
+    line(ctx, [[bx + 3, by], [bx + 3, by - mast]], '#f2a900', 2)
+    for (let z = 0; z < mast; z += 10) line(ctx, [[bx - 3, by - z], [bx + 3, by - z - 10]], '#f2a900', 1)
+  }
+  // jib overhangs the building toward the centre, in world space so it stays visible from every angle
+  const bw = at(CRANE_X, CRANE_Y), cw = at(size / 2, size / 2)
+  const JIB_SKEW = 15 * Math.PI / 180 // keeps the jib from ever lining up exactly with the camera axis
+  const dx = cw[0] - bw[0], dy = cw[1] - bw[1]
+  const jx = dx * Math.cos(JIB_SKEW) - dy * Math.sin(JIB_SKEW)
+  const jy = dx * Math.sin(JIB_SKEW) + dy * Math.cos(JIB_SKEW)
+  const jibAt = (t: number) => {
+    const q = toIso(bw[0] + jx * t, bw[1] + jy * t)
+    return { x: q.x, gy: q.y, y: q.y - 2 - mast }
+  }
+  const tip = jibAt(1.4), tail = jibAt(-0.25)
   const cab = { x: bx, y: by - mast }
-  line(ctx, [[bx - 14, cab.y + 1], [tip.x, cab.y + 1]], '#f2a900', 3)
-  line(ctx, [[bx, cab.y - 14], [tip.x, cab.y + 1]], '#c98a00', 1)
-  line(ctx, [[bx, cab.y - 14], [bx - 14, cab.y + 1]], '#c98a00', 1)
-  boxAt(ctx, at, -0.65, -0.65, 0.2, 0.2, 0, '#444')
-  ctx.fillStyle = '#555'; ctx.fillRect(bx - 18, cab.y - 2, 8, 6) // counterweight
-  ctx.fillStyle = '#fff'; ctx.fillRect(bx - 4, cab.y - 6, 8, 6) // cab
+  const drawCounterweight = () => { ctx.fillStyle = '#555'; ctx.fillRect(tail.x - 4, tail.y - 2, 8, 6) }
   // hook cycling: lowers to building top, raises with material
-  const cx = bx + (tip.x - bx) * 0.7
+  const hp = jibAt(0.9)
+  const cx = hp.x
   let seed = 2166136261
   const sid = String(b.p.id)
   for (let i = 0; i < sid.length; i++) seed = Math.imul(seed ^ sid.charCodeAt(i), 16777619)
@@ -561,15 +620,29 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   const offset = (seed % 6283) / 1000 // 0..2π radians
   const period = 600 + ((seed >>> 13) % 300) // 600..900 ms
   const phase = (Math.sin(time / period + offset) + 1) / 2
-  const topY = base.y - top - 8
-  const hookY = cab.y + 10 + (topY - cab.y - 10) * phase
-  line(ctx, [[cx, cab.y + 1], [cx, hookY]], '#222', 1)
-  ctx.fillStyle = '#222'; ctx.fillRect(cx - 2, hookY, 4, 4)
-  if (phase > 0.15) { ctx.fillStyle = '#c0562a'; ctx.fillRect(cx - 6, hookY + 4, 12, 4) }
-  // progress bar
-  const lb = iso(size / 2, size / 2)
-  ctx.fillStyle = '#0006'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40, 5)
-  ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
+  const topY = hp.gy - top - 8
+  const hookY = hp.y + 10 + (topY - hp.y - 10) * phase
+  const drawHook = () => {
+    line(ctx, [[cx, hp.y + 1], [cx, hookY]], '#222', 1)
+    ctx.fillStyle = '#222'; ctx.fillRect(cx - 2, hookY, 4, 4)
+    if (phase > 0.15) { ctx.fillStyle = '#c0562a'; ctx.fillRect(cx - 6, hookY + 4, 12, 4) }
+  }
+  const tipFar = tip.gy < tail.gy
+  const drawTipSide = () => {
+    if (tipFar) drawHook()
+    line(ctx, [[bx, cab.y + 1], [tip.x, tip.y + 1]], '#f2a900', 3)
+    line(ctx, [[bx, cab.y - 14], [tip.x, tip.y + 1]], '#c98a00', 1)
+    if (!tipFar) drawHook()
+  }
+  const drawTailSide = () => {
+    line(ctx, [[tail.x, tail.y + 1], [bx, cab.y + 1]], '#f2a900', 3)
+    line(ctx, [[bx, cab.y - 14], [tail.x, tail.y + 1]], '#c98a00', 1)
+    drawCounterweight()
+  }
+  // Whichever side points away from the camera is hidden behind the mast and cab.
+  if (tipFar) { drawTipSide(); drawMast(); drawTailSide() }
+  else { drawTailSide(); drawMast(); drawTipSide() }
+  ctx.fillStyle = '#fff'; ctx.fillRect(bx - 4, cab.y - 6, 8, 6) // cab
 }
 
 export interface Traffic {
@@ -790,16 +863,26 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   })
 
   // depth-sorted buildings
-  const order = [...s.placed].sort((a, b) => viewDepth(a, s.cam.angle) - viewDepth(b, s.cam.angle) || a.gx - b.gx)
-  for (const b of order) {
+  const items: { b: Placed; crane: boolean; depth: number }[] = []
+  for (const b of s.placed) {
+    items.push({ b, crane: false, depth: viewDepth(b, s.cam.angle) })
+    if (progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
+  }
+  items.sort((a, c) => a.depth - c.depth || a.b.gx - c.b.gx || Number(a.crane) - Number(c.crane))
+  for (const { b, crane } of items) {
     const prog = progressOf(b, s.elapsed)
     if (prog <= 0) continue
     const fh = finalHeight(b.p)
-    if (prog < 1) drawSite(ctx, b, prog, fh, s.time)
+    if (crane) { drawSite(ctx, b, prog, fh, s.time, 'crane'); continue }
+    if (prog < 1) drawSite(ctx, b, prog, fh, s.time, 'site')
     else drawFinished(ctx, b, fh, s.time)
     if (s.selected === b.p.id) {
       diamond(ctx, b.gx - 0.1, b.gy - 0.1, b.size + 0.2, b.size + 0.2, 0, 'rgba(255,255,255,0.25)', '#fff')
     }
+  }
+  for (const b of s.placed) {
+    const prog = progressOf(b, s.elapsed)
+    if (prog > 0 && prog < 1) drawProgressBar(ctx, b, prog)
   }
 
   // live placement preview

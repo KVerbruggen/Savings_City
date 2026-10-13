@@ -19,17 +19,13 @@ determined by the project's original inputs.
   are loaded together start together, but each building takes a different
   amount of time to finish based on its estimated effort. A newly submitted
   project starts building when it is submitted.
-- **Building color and facade style** represent the savings ratio:
-  - More than 70% saved: glass building
-  - Less than 30% saved: brick building
-  - Otherwise: mixed/concrete building
+- **Building style:** all buildings use the glass style.
 - **Gold trim** indicates a project with more than $1,500 in budget used.
 - **Helipad and neon detail** indicate a project with more than $5,000 in
   budget used. The budget also controls the brighter window lighting on these
   buildings.
-- **Roof structures** are decorative style details: glass buildings have a
-  crystal crown, brick buildings have a brick cornice, and mixed buildings have
-  a concrete rooftop structure.
+- **Roof block:** big buildings have a crystal roof block in the back-right
+  corner (as seen from the door). Medium buildings have a flat roof.
 
 ### Streets and vehicles
 

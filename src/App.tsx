@@ -5,7 +5,7 @@ import {
 import {
   type Camera, type Facing, type Placed, type Preview, type Traffic,
   centerOn, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
-  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, styleOf, toIso,
+  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
 } from './engine'
 
 type Tool = 'none' | 'road' | 'delete'
@@ -52,6 +52,11 @@ export default function App() {
   const placed = useMemo(() => layout(projects, constructionStartsRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startsVersion intentionally invalidates this memo
     [projects, startsVersion])
+  const [nowTick, setNowTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(performance.now()), 250)
+    return () => clearInterval(id)
+  }, [])
   const carsRef = useRef<Traffic[]>([])
   const cursorRef = useRef({ x: -9999, y: -9999 })
   const stateRef = useRef<{ placed: Placed[]; roads: Set<string>; selected?: string; placing?: Placing; tool: Tool; roadMenu: boolean }>({ placed: [], roads: new Set(), tool: 'none', roadMenu: false })
@@ -381,6 +386,7 @@ export default function App() {
   const move = async (p: Project) => {
     if (placing || typeof p.gx !== 'number' || typeof p.gy !== 'number') return
     const origin = { gx: p.gx, gy: p.gy, facing: (p.facing ?? 2) as Facing }
+    setTip(undefined)
     await dataService.update(p.id, { gx: null, gy: null })
     setProjects(await dataService.list())
     setPlacing({ id: p.id, name: p.name, size: footprint(p), height: finalHeight(p), facing: origin.facing, origin })
@@ -425,7 +431,20 @@ export default function App() {
             <div key={p.id} className={`flex items-center justify-between rounded px-2 py-1 text-sm ${selected === p.id ? 'bg-slate-600' : 'bg-slate-800 hover:bg-slate-700'}`}>
               <button className="flex-1 text-left" onClick={() => focus(p.id)}>
                 <div className="font-medium">{p.name}{p.gx === null && <span className="ml-1 text-xs text-amber-400">(placing…)</span>}</div>
-                <div className="text-xs text-slate-400">{timeSaved(p).toFixed(1)} h saved · {(timeSavingsRatio(p) * 100).toFixed(0)}%</div>
+                <div className="text-xs text-slate-400">{timeSaved(p).toFixed(1)} h / {(timeSavingsRatio(p) * 100).toFixed(0)}% saved</div>
+                {(() => {
+                  const b = placed.find((x) => x.p.id === p.id)
+                  const pct = b ? progressOf(b, nowTick - startRef.current) * 100 : 0
+                  if (!b || pct >= 100) return null
+                  return (
+                    <>
+                      <div className="text-xs text-slate-400">{pct.toFixed(0)}% finished</div>
+                      <div className="mt-0.5 h-1 w-full overflow-hidden rounded bg-slate-700">
+                        <div className="h-full bg-emerald-400" style={{ width: `${pct}%` }} />
+                      </div>
+                    </>
+                  )
+                })()}
               </button>
               <button aria-label="Move" title="Move" disabled={!!placing || p.gx === null} className="px-1 text-slate-400 hover:text-sky-300 disabled:opacity-40" onClick={() => void move(p)}>✥</button>
               <button aria-label="Edit" className="px-1 text-slate-400 hover:text-amber-300" onClick={() => edit(p)}>✎</button>
@@ -549,12 +568,13 @@ export default function App() {
         {tip && !placing && (
           <div ref={tipRef} className="pointer-events-none absolute w-56 rounded-lg border-2 border-amber-400 bg-slate-900/95 p-3 text-sm shadow-xl" style={{ left: tip.x, top: tip.y }}>
             <button aria-label="Move" title="Move" className="pointer-events-auto absolute right-2 top-2 h-7 w-7 rounded bg-slate-800 text-slate-300 hover:text-sky-300" onClick={() => void move(tip.b.p)}>✥</button>
-            <div className="pr-8 font-bold">{tip.b.p.name}</div>
+            <button aria-label="Edit" title="Edit" className="pointer-events-auto absolute right-11 top-2 h-7 w-7 rounded bg-slate-800 text-slate-300 hover:text-amber-300" onClick={() => edit(tip.b.p)}>✎</button>
+            <div className="pr-16 font-bold">{tip.b.p.name}</div>
             <div className="mb-1 text-xs text-slate-400">{tip.b.p.description}</div>
             <div>Hours saved: {timeSaved(tip.b.p).toFixed(1)}</div>
             <div>Hours spent with AI: {tip.b.p.time_spent_ai.toFixed(1)}</div>
             <div>Estimated hours without AI: {tip.b.p.time_estimated_no_ai.toFixed(1)}</div>
-            <div>Savings ratio: {(timeSavingsRatio(tip.b.p) * 100).toFixed(0)}% ({styleOf(tip.b.p)})</div>
+            <div>Savings ratio: {(timeSavingsRatio(tip.b.p) * 100).toFixed(0)}%</div>
             <div>Budget: ${tip.b.p.budget_spent.toLocaleString()}</div>
           </div>
         )}
