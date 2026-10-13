@@ -638,10 +638,9 @@ function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   }
   const tipFar = tip.gy < tail.gy
   const drawTipSide = () => {
-    if (tipFar) drawHook()
+    drawHook() // always behind the arm: the camera looks down from above
     line(ctx, [[bx, cab.y + 1], [tip.x, tip.y + 1]], '#f2a900', 3)
     line(ctx, [[bx, cab.y - 14], [tip.x, tip.y + 1]], '#c98a00', 1)
-    if (!tipFar) drawHook()
   }
   const drawTailSide = () => {
     line(ctx, [[tail.x, tail.y + 1], [bx, cab.y + 1]], '#f2a900', 3)
@@ -663,6 +662,8 @@ export interface Traffic {
   color: string
   dir: 1 | -1
   lastTime: number
+  cruise?: number // speed before the corner slowdown is applied
+  turn?: { seg: [V2, V2]; dir: 1 | -1; a: V2; c: V2; c2?: V2; b: V2; r1: number; r2: number; passed: boolean; slow: number; lut: number[]; len: number } // visual curve through the next junction
 }
 
 export interface Camera { x: number; y: number; zoom: number; angle: number }
@@ -686,12 +687,29 @@ export interface RenderState {
 export const progressOf = (b: Placed, elapsed: number) =>
   b.duration <= 0 ? 1 : Math.max(0, Math.min(1, (elapsed - b.start) / b.duration))
 
+export function formatRemaining(b: Placed, elapsed: number) {
+  const s = Math.max(0, Math.ceil((b.start + b.duration - elapsed) / 1000))
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
 function viewDepth(b: Placed, angle: number) {
   // The projected vertical axis determines which footprint is farther away.
   return toIso(b.gx + b.size / 2, b.gy + b.size / 2, angle).y + b.size
 }
 
 export const carCountFor = (n: number) => (n < 1 ? 0 : Math.min(30, n * 2))
+
+const bezier = (a: V2, c: V2, b: V2, u: number, c2?: V2): V2 => {
+  if (c2) {
+    const m = 1 - u, w0 = m * m * m, w1 = 3 * m * m * u, w2 = 3 * m * u * u, w3 = u * u * u
+    return [w0 * a[0] + w1 * c[0] + w2 * c2[0] + w3 * b[0], w0 * a[1] + w1 * c[1] + w2 * c2[1] + w3 * b[1]]
+  }
+  const w0 = (1 - u) * (1 - u), w1 = 2 * u * (1 - u), w2 = u * u
+  return [w0 * a[0] + w1 * c[0] + w2 * b[0], w0 * a[1] + w1 * c[1] + w2 * b[1]]
+}
 
 const roadEdges = (roads: Set<string>): [V2, V2][] => [...roads].map(parseEdge)
 
@@ -847,10 +865,19 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       car.speed = leaderSpeed + (car.baseSpeed - leaderSpeed) * t
     } else car.speed = car.baseSpeed
     // Ease toward the target speed so following cars don't surge and brake.
-    const prevSpeed = previousSpeed[index] || car.baseSpeed
+    const prevSpeed = car.cruise ?? (previousSpeed[index] || car.baseSpeed)
     const maxStep = car.baseSpeed * 0.5 * dt
     car.speed = prevSpeed + Math.max(-maxStep, Math.min(maxStep, car.speed - prevSpeed))
-    car.t += (dt * car.speed) / L
+    car.cruise = car.speed
+    // Slow down through corners. The factor is already smooth in distance, so it is applied directly.
+    if (car.turn) {
+      const dj = car.turn.passed ? car.t * L : (1 - car.t) * L
+      const w = Math.max(0, Math.min(1, 1 - dj / 0.5))
+      car.speed *= 1 - (1 - car.turn.slow) * w * w * (3 - 2 * w)
+    }
+    // The curve's length differs from the street distance it replaces; compensate so the real speed matches.
+    const pathScale = car.turn && (car.turn.passed ? car.t * L < car.turn.r2 : (1 - car.t) * L < car.turn.r1) ? (car.turn.r1 + car.turn.r2) / car.turn.len : 1
+    car.t += (dt * car.speed * pathScale) / L
     if (leader) {
       // Hard floor on the gap so frame-order effects can't let the car creep up on the leader.
       const li = s.cars.indexOf(leader)
@@ -858,31 +885,71 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       car.t = Math.max(previous[index], Math.min(car.t, limit))
     }
     car.lastTime = s.time
-    if (car.t >= 1) {
-      // Reached a junction: pick a random street leaving it (no U-turn unless dead end).
+    const laneOffset = (seg: [V2, V2], dir: 1 | -1): V2 => {
+      const m = norm(sub(seg[1], seg[0]))
+      return mul([m[1], -m[0]], -0.07 * dir)
+    }
+    const lanePoint = (seg: [V2, V2], dir: 1 | -1, t: number): V2 => {
+      const sl = Math.max(0.001, dist(seg[0], seg[1]))
+      return add(add(seg[0], mul(norm(sub(seg[1], seg[0])), sl * (dir === 1 ? t : 1 - t))), laneOffset(seg, dir))
+    }
+    // Pick the street to take at the end of this one (no U-turn unless dead end) and build the
+    // curve joining the two lanes. The curve is purely visual: car.t / car.edge keep the original
+    // logic, so queueing is unaffected.
+    const planTurn = () => {
       const end = car.dir === 1 ? e[1] : e[0]
       const near = (p: V2) => dist(p, end) < 0.01
-      const same = (f: [V2, V2]) =>
-        (dist(f[0], e[0]) < 0.01 && dist(f[1], e[1]) < 0.01) || (dist(f[0], e[1]) < 0.01 && dist(f[1], e[0]) < 0.01)
-      const options: { edge: number; dir: 1 | -1 }[] = []
-      edges.forEach((f, j) => {
-        if (same(f)) return
-        if (near(f[0])) options.push({ edge: j, dir: 1 })
-        else if (near(f[1])) options.push({ edge: j, dir: -1 })
+      const options: { seg: [V2, V2]; dir: 1 | -1 }[] = []
+      edges.forEach((f) => {
+        if (sameSeg(f, e)) return
+        if (near(f[0])) options.push({ seg: f, dir: 1 })
+        else if (near(f[1])) options.push({ seg: f, dir: -1 })
       })
-      if (options.length) {
-        const o = options[Math.floor(Math.random() * options.length)]
-        car.edge = o.edge; car.dir = o.dir; car.seg = edges[o.edge]
-      } else {
-        car.dir = car.dir === 1 ? -1 : 1
+      const o = options.length ? options[Math.floor(Math.random() * options.length)] : { seg: e, dir: (car.dir === 1 ? -1 : 1) as 1 | -1 }
+      const nL = Math.max(0.001, dist(o.seg[0], o.seg[1]))
+      const uTurnPlanned = !options.length || dist(o.seg[0], e[0]) < 0.01 && dist(o.seg[1], e[1]) < 0.01 || sameSeg(o.seg, e)
+      const r1 = Math.min(uTurnPlanned ? 0.1 : 0.25, L / 2), r2 = Math.min(r1, nL / 2)
+      const oldOff = laneOffset(e, car.dir), newOff = laneOffset(o.seg, o.dir)
+      const d1 = mul(norm(sub(e[1], e[0])), car.dir), d2 = mul(norm(sub(o.seg[1], o.seg[0])), o.dir)
+      const k = 1 + d1[0] * d2[0] + d1[1] * d2[1]
+      const a = lanePoint(e, car.dir, 1 - r1 / L), b = lanePoint(o.seg, o.dir, r2 / nL)
+      // Control point = where the two lane lines cross, so the curve is tangent to both.
+      const uTurn = k < 0.2
+      const c = uTurn ? add(a, mul(d1, dist(a, b))) : add(end, mul(add(oldOff, newOff), 1 / k))
+      const c2 = uTurn ? add(b, mul(d1, dist(a, b))) : undefined
+      const lut = [0]
+      let prev = a
+      for (let i = 1; i <= 16; i++) {
+        const p = bezier(a, c, b, i / 16, c2)
+        lut.push(lut[i - 1] + dist(prev, p)); prev = p
       }
-      car.t = 0
-      return
+      car.turn = { seg: o.seg, dir: o.dir, a, c, c2, b, r1, r2, passed: false, slow: (() => { const d = d1[0] * d2[0] + d1[1] * d2[1]; return d >= 0 ? 0.3 + 0.7 * d : 0.3 + 0.18 * d })(), lut, len: Math.max(0.001, lut[16]) }
     }
-    const n = norm(sub(e[1], e[0]))
-    const perp: V2 = [n[1], -n[0]]
-    // Keep right: the offset flips with the driving direction.
-    const pos = add(add(e[0], mul(n, L * (car.dir === 1 ? car.t : 1 - car.t))), mul(perp, -0.07 * car.dir))
+    if ((!car.turn || car.turn.passed) && (1 - car.t) * L <= 0.5) planTurn()
+    if (car.t >= 1) {
+      if (!car.turn || car.turn.passed) planTurn()
+      const tr = car.turn!
+      const found = edges.findIndex((f) => sameSeg(f, tr.seg))
+      if (found >= 0) { car.edge = found; car.dir = tr.dir; car.seg = edges[found] }
+      else car.dir = car.dir === 1 ? -1 : 1
+      tr.passed = true
+      car.t = 0
+    }
+    const ce = edges[car.edge]
+    const cL = Math.max(0.001, dist(ce[0], ce[1]))
+    if (car.turn?.passed && car.t * cL >= 0.5) car.turn = undefined
+    let pos: V2
+    if (car.turn && (car.turn.passed ? car.t * cL < car.turn.r2 : (1 - car.t) * L < car.turn.r1)) {
+      const { r1, r2, passed, lut, len } = car.turn
+      const frac = Math.max(0, Math.min(1, (passed ? r1 + car.t * cL : r1 - (1 - car.t) * cL) / Math.max(0.001, r1 + r2)))
+      const target = frac * len
+      let i = 1
+      while (i < 16 && lut[i] < target) i++
+      const seglen = Math.max(1e-6, lut[i] - lut[i - 1])
+      pos = bezier(car.turn.a, car.turn.c, car.turn.b, (i - 1 + Math.max(0, Math.min(1, (target - lut[i - 1]) / seglen))) / 16, car.turn.c2)
+    } else {
+      pos = lanePoint(ce, car.dir, car.t)
+    }
     const q = toIso(pos[0], pos[1])
     ctx.fillStyle = car.color
     ctx.beginPath(); ctx.ellipse(q.x, q.y - 2, 3, 1.9, 0, 0, Math.PI * 2); ctx.fill()

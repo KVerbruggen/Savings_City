@@ -4,7 +4,7 @@ import {
 } from './services/storageService'
 import {
   type Camera, type Facing, type Placed, type Preview, type Traffic,
-  centerOn, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
+  centerOn, formatRemaining, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
   placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
 } from './engine'
 
@@ -438,7 +438,7 @@ export default function App() {
                   if (!b || pct >= 100) return null
                   return (
                     <>
-                      <div className="text-xs text-slate-400">{pct.toFixed(0)}% finished</div>
+                      <div className="text-xs text-slate-400">{pct.toFixed(0)}% finished · {formatRemaining(b, nowTick - startRef.current)} left</div>
                       <div className="mt-0.5 h-1 w-full overflow-hidden rounded bg-slate-700">
                         <div className="h-full bg-emerald-400" style={{ width: `${pct}%` }} />
                       </div>
@@ -576,6 +576,12 @@ export default function App() {
             <div>Estimated hours without AI: {tip.b.p.time_estimated_no_ai.toFixed(1)}</div>
             <div>Savings ratio: {(timeSavingsRatio(tip.b.p) * 100).toFixed(0)}%</div>
             <div>Budget: ${tip.b.p.budget_spent.toLocaleString()}</div>
+            {(() => {
+              const el = nowTick - startRef.current
+              const pct = progressOf(tip.b, el) * 100
+              if (pct >= 100) return null
+              return <div>Finished: {pct.toFixed(0)}% · {formatRemaining(tip.b, el)} left</div>
+            })()}
           </div>
         )}
         {showForm && (
