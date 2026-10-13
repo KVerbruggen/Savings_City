@@ -2,12 +2,12 @@ import { type Project, timeSaved } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
-// Floors follow MAX_FLOORS * (1 - e^(-(hours / FLOOR_CURVE_HOURS)^FLOOR_CURVE_POWER)).
-// 50h saved ≈ 5 floors, 100h ≈ 13, 500h ≈ 106, 1000h ≈ 177; never exceeds MAX_FLOORS.
-const MAX_FLOORS = 200
-const FLOOR_CURVE_HOURS = 600
+// Floors follow MAX_FLOORS * (min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS)^FLOOR_CURVE_POWER.
+// 5h saved ≈ 6 floors, 50h = 20, 200h ≈ 46, 500h ≈ 69; 1000h and above = MAX_FLOORS.
+const MAX_FLOORS = 100
+const MAX_FLOOR_HOURS = 1000
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
-const FLOOR_CURVE_POWER = 1.5 // >1 keeps low-hour buildings short, then ramps up
+const FLOOR_CURVE_POWER = 0.537 // <1 gives a steep start that flattens out
 const FLOOR_HEIGHT = 10 // px per floor
 let projectionAngle = 0
 
@@ -185,13 +185,13 @@ function buildingReach(placed: Placed[]) {
   return out
 }
 
-export function roadError(key: string, placed: Placed[], roads: Set<string>): string | undefined {
+export function roadError(key: string, placed: Placed[], roads: Set<string>, verts?: Set<string>): string | undefined {
   if (roads.has(key)) return 'Already a road'
   const [a0, b0] = parseEdge(key)
   const edge: [number, number, number, number] = [a0[0], a0[1], b0[0], b0[1]]
   if (!buildingReach(placed).some((b) => gapBetween(edge, b.rect) <= b.reach)) return 'A road must be near a building'
   if (roads.size > 0) {
-    const verts = roadVertices(roads)
+    verts ??= roadVertices(roads)
     const [a, b] = parseEdge(key)
     if (!verts.has(`${a[0]},${a[1]}`) && !verts.has(`${b[0]},${b[1]}`)) return 'A road must connect to an existing road'
   }
@@ -211,10 +211,13 @@ export function edgeRun(start: string, map: V2): string[] {
 
 export function roadsToAdd(run: string[], placed: Placed[], roads: Set<string>): string[] {
   const work = new Set(roads)
+  let verts: Set<string> | undefined
   const out: string[] = []
   for (const key of run) {
-    if (roadError(key, placed, work)) break
+    if (roadError(key, placed, work, verts ??= roadVertices(roads))) break
     work.add(key)
+    const [a, b] = parseEdge(key)
+    verts.add(`${a[0]},${a[1]}`); verts.add(`${b[0]},${b[1]}`)
     out.push(key)
   }
   return out
@@ -270,14 +273,29 @@ export function roadsToPrune(placed: Placed[], roads: Set<string>): string[] {
 /** Fixed sun direction in map space (unit-ish), independent of the camera angle. */
 const LIGHT_DIR: V2 = [0.97, 0.24]
 
+const shadeCache = new Map<string, string>()
 function shade(hex: string, f: number) {
+  const ck = hex + f
+  const hit = shadeCache.get(ck)
+  if (hit) return hit
+  const r = shadeRaw(hex, f)
+  shadeCache.set(ck, r)
+  return r
+}
+function shadeRaw(hex: string, f: number) {
   const n = parseInt(hex.slice(1), 16)
   const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)))
   return `rgb(${c(n >> 16)},${c((n >> 8) & 255)},${c(n & 255)})`
 }
 
 /** Stable pseudo-random building color derived from the project id. */
+const colorCache = new Map<string, string>()
 function randomColor(id: string) {
+  let c = colorCache.get(id)
+  if (!c) colorCache.set(id, c = randomColorRaw(id))
+  return c
+}
+function randomColorRaw(id: string) {
   let h = 2166136261
   for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 16777619)
   h >>>= 0
@@ -343,13 +361,16 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
       const length = Math.hypot(dx, dy)
       const wx = dx / length * 5, wy = dy / length * 5
       const cols = Math.max(1, Math.round(mapLen * 2))
+      ctx.beginPath()
       for (let r = 0; r < rows; r++) {
         for (let k = 0; k < cols; k++) {
           const t = ws < 1 ? (dx >= 0 ? 0.42 : 0.58) - 2.5 / length : (k + 0.3) / cols
           const x = from.x + dx * t, y = from.y + dy * t - z0 - base - r * 12
-          poly(ctx, [[x, y], [x + wx, y + wy], [x + wx, y + wy - 6.5 * ws], [x, y - 6.5 * ws]], tint)
+          ctx.moveTo(x, y); ctx.lineTo(x + wx, y + wy); ctx.lineTo(x + wx, y + wy - 6.5 * ws); ctx.lineTo(x, y - 6.5 * ws); ctx.closePath()
         }
       }
+      ctx.fillStyle = tint
+      ctx.fill()
     }
     const prevBrighter = lightPrev >= lightNext
     const isDoorWall = (i: number, j: number) => !!opts.noWindowsOn?.some((w) =>
@@ -416,7 +437,7 @@ function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing
 
 export const finalHeight = (p: Project) => {
   const hours = Math.max(0, timeSaved(p))
-  const floors = MAX_FLOORS * (1 - Math.exp(-Math.pow(hours / FLOOR_CURVE_HOURS, FLOOR_CURVE_POWER)))
+  const floors = MAX_FLOORS * Math.pow(Math.min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS, FLOOR_CURVE_POWER)
   return Math.max(10, floors * FLOOR_HEIGHT)
 }
 
@@ -712,7 +733,14 @@ const bezier = (a: V2, c: V2, b: V2, u: number, c2?: V2): V2 => {
   return [w0 * a[0] + w1 * c[0] + w2 * b[0], w0 * a[1] + w1 * c[1] + w2 * b[1]]
 }
 
-const roadEdges = (roads: Set<string>): [V2, V2][] => [...roads].map(parseEdge)
+// Road sets are replaced, never mutated, once they reach the renderer.
+const roadGeom = new WeakMap<Set<string>, { edges: [V2, V2][]; verts: V2[] }>()
+const roadGeometry = (roads: Set<string>) => {
+  let g = roadGeom.get(roads)
+  if (!g) roadGeom.set(roads, g = { edges: [...roads].map(parseEdge), verts: [...roadVertices(roads)].map((v) => v.split(',').map(Number) as V2) })
+  return g
+}
+const roadEdges = (roads: Set<string>) => roadGeometry(roads).edges
 
 export function makeCars(placed: Placed[], roads: Set<string>): Traffic[] {
   const count = carCountFor(placed.length)
@@ -773,6 +801,9 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   ctx.translate(w / 2 + s.cam.x, h / 2 + s.cam.y)
   ctx.scale(s.cam.zoom, s.cam.zoom)
   projectionAngle = s.cam.angle
+  // Visible rectangle in projected (pre-camera) coordinates, used to skip off-screen drawing.
+  const vx0 = (-w / 2 - s.cam.x) / s.cam.zoom, vx1 = (w / 2 - s.cam.x) / s.cam.zoom
+  const vy0 = (-h / 2 - s.cam.y) / s.cam.zoom, vy1 = (h / 2 - s.cam.y) / s.cam.zoom
 
   // Ground covers the whole viewport, so the city can grow in any direction;
   // the "map" is effectively infinite. Project the screen corners back to map
@@ -816,18 +847,29 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       const n = norm(sub(b, a)), p: V2 = [-n[1], n[0]]
       return [add(a, mul(p, half)), add(b, mul(p, half)), sub(b, mul(p, half)), sub(a, mul(p, half))].map(iso)
     }
-    const disc = (c: V2, r: number) =>
-      Array.from({ length: 20 }, (_, i) => iso([c[0] + Math.cos(i / 20 * Math.PI * 2) * r, c[1] + Math.sin(i / 20 * Math.PI * 2) * r]))
-    const verts = [...roadVertices(s.roads)].map((v) => v.split(',').map(Number) as V2)
+    const unit = Array.from({ length: 20 }, (_, i) => [Math.cos(i / 20 * Math.PI * 2), Math.sin(i / 20 * Math.PI * 2)])
+    const disc = (c: V2, r: number) => unit.map((u) => iso([c[0] + u[0] * r, c[1] + u[1] * r]))
+    const verts = roadGeometry(s.roads).verts
+    const onScreen = (x0: number, y0: number, x1: number, y1: number) =>
+      Math.max(x0, x1) + 30 >= vx0 && Math.min(x0, x1) - 30 <= vx1 && Math.max(y0, y1) + 30 >= vy0 && Math.min(y0, y1) - 30 <= vy1
+    const visEdges = edges.filter(([a, b]) => { const p = toIso(a[0], a[1]), q = toIso(b[0], b[1]); return onScreen(p.x, p.y, q.x, q.y) })
+    const visVerts = verts.filter((v) => { const p = toIso(v[0], v[1]); return onScreen(p.x, p.y, p.x, p.y) })
+    // One path per layer. Discs are wound opposite to the bands so overlaps never cancel under the nonzero rule.
     const layer = (half: number, color: string) => {
-      for (const [a, b] of edges) poly(ctx, band(a, b, half), color)
-      for (const v of verts) poly(ctx, disc(v, half), color)
+      ctx.beginPath()
+      const add = (pts: [number, number][]) => { pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath() }
+      for (const [a, b] of visEdges) add(band(a, b, half) as [number, number][])
+      for (const v of visVerts) add((disc(v, half) as [number, number][]).reverse())
+      ctx.fillStyle = color
+      ctx.fill()
     }
     layer(0.24, '#d6d3cc')
     layer(hw, '#4a4e57')
     ctx.save()
     ctx.setLineDash([10, 9])
-    for (const [a, b] of edges) line(ctx, [iso(a), iso(b)], 'rgba(250,220,90,0.9)', 1.2)
+    ctx.beginPath()
+    for (const [a, b] of visEdges) { const p = iso(a), q = iso(b); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]) }
+    ctx.strokeStyle = 'rgba(250,220,90,0.9)'; ctx.lineWidth = 1.2; ctx.stroke()
     ctx.restore()
   }
 
@@ -849,19 +891,20 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
     const e = edges[car.edge]
     const L = Math.max(0.001, dist(e[0], e[1]))
     const dt = car.lastTime ? Math.min(80, s.time - car.lastTime) / 1000 : 0
-    const sameLane = s.cars.filter((other, j) => j !== index && other.edge === car.edge && other.dir === car.dir)
     let ahead = 1
     let leader: Traffic | undefined
-    for (const other of sameLane) {
-      const otherIndex = s.cars.indexOf(other)
+    let leaderIndex = -1
+    for (let otherIndex = 0; otherIndex < s.cars.length; otherIndex++) {
+      const other = s.cars[otherIndex]
+      if (otherIndex === index || other.edge !== car.edge || other.dir !== car.dir) continue
       const d = previous[otherIndex] - previous[index]
       // Only cars further along this street block us (streets aren't loops); ties go to the lower index so nobody deadlocks.
-      if ((d > 0 || (d === 0 && otherIndex < index)) && d < ahead) { ahead = d; leader = other }
+      if ((d > 0 || (d === 0 && otherIndex < index)) && d < ahead) { ahead = d; leader = other; leaderIndex = otherIndex }
     }
     const gap = ahead * L
     if (leader) {
       // Match the leader's pace instead of stopping; close the gap to a quarter of the old following distance.
-      const leaderSpeed = Math.min(car.baseSpeed, previousSpeed[s.cars.indexOf(leader)] || leader.baseSpeed)
+      const leaderSpeed = Math.min(car.baseSpeed, previousSpeed[leaderIndex] || leader.baseSpeed)
       const t = Math.min(1, Math.max(0, (gap - 0.3) / 0.75))
       car.speed = leaderSpeed + (car.baseSpeed - leaderSpeed) * t
     } else car.speed = car.baseSpeed
@@ -881,7 +924,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
     car.t += (dt * car.speed * pathScale) / L
     if (leader) {
       // Hard floor on the gap so frame-order effects can't let the car creep up on the leader.
-      const li = s.cars.indexOf(leader)
+      const li = leaderIndex
       const limit = previous[li] + (dt * (previousSpeed[li] || 0)) / L - 0.3 / L
       car.t = Math.max(previous[index], Math.min(car.t, limit))
     }
@@ -967,6 +1010,9 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
     const prog = progressOf(b, s.elapsed)
     if (prog <= 0) continue
     const fh = finalHeight(b.p)
+    const bc = toIso(b.gx + b.size / 2, b.gy + b.size / 2)
+    const pad = b.size * TILE_W + 100
+    if (bc.x + pad < vx0 || bc.x - pad > vx1 || bc.y + pad < vy0 || bc.y - pad - fh - 120 > vy1) continue
     if (crane) { drawSite(ctx, b, prog, fh, s.time, 'crane'); continue }
     if (prog < 1) drawSite(ctx, b, prog, fh, s.time, 'site')
     else drawFinished(ctx, b, fh, s.time)
@@ -1005,7 +1051,8 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       if (!s.roads.size) {
         for (const b of s.placed) for (const f of [0, 1, 2, 3] as Facing[]) for (const k of frontEdges(b.gx, b.gy, b.size, f)) cands.add(k)
       }
-      for (const key of cands) if (!roadError(key, s.placed, s.roads)) open.add(key)
+      const rv = roadVertices(s.roads)
+      for (const key of cands) if (!roadError(key, s.placed, s.roads, rv)) open.add(key)
       dashed(open, 'rgba(56,189,248,0.9)')
       const good = new Set(roadsToAdd(pv.edges, s.placed, s.roads))
       for (const key of pv.edges) {
