@@ -2,7 +2,12 @@ import { type Project, timeSaved, timeSavingsRatio } from './services/storageSer
 
 export const TILE_W = 64
 export const TILE_H = 32
-const VERTICAL_SCALE = 1.2
+// Floors follow MAX_FLOORS * (1 - e^(-(hours / FLOOR_CURVE_HOURS)^FLOOR_CURVE_POWER)).
+// 50h saved ≈ 5 floors, 100h ≈ 13, 500h ≈ 106, 1000h ≈ 177; never exceeds MAX_FLOORS.
+const MAX_FLOORS = 200
+const FLOOR_CURVE_HOURS = 600
+const FLOOR_CURVE_POWER = 1.5 // >1 keeps low-hour buildings short, then ramps up
+const FLOOR_HEIGHT = 10 // px per floor
 let projectionAngle = 0
 
 export type V2 = [number, number]
@@ -675,6 +680,15 @@ export interface Placed {
   duration: number // ms
 }
 
+// Build time is linear in hours spent with AI, with no cap: one hour of build
+// time per hour spent, plus a 3s minimum. A project that saves a lot for
+// little spend rises tall but finishes fast. 1h ≈ 1 h, 10h ≈ 10 h, 48h ≈ 2 days.
+const BUILD_HOURS_PER_HOUR_SPENT = 1
+export const buildDuration = (p: Project) => {
+  const hours = Math.max(0, p.time_spent_ai)
+  return 3000 + hours * BUILD_HOURS_PER_HOUR_SPENT * 3600 * 1000
+}
+
 export function layout(projects: Project[], constructionStarts = new Map<string, number>(), prev: Placed[] = []): Placed[] {
   const out: Placed[] = []
   for (const p of projects) {
@@ -684,7 +698,7 @@ export function layout(projects: Project[], constructionStarts = new Map<string,
     // Projects loaded together start together. A newly submitted project can
     // provide its own elapsed start time without shifting older buildings.
     const start = constructionStarts.get(p.id) ?? 0
-    const duration = 3000 + Math.min(p.time_estimated_no_ai, 300) * 15
+    const duration = buildDuration(p)
     // Keep the previously fitted position when nothing about the plot or the
     // tier changed, so editing a project does not move its building.
     const old = prev.find((x) => x.p.id === p.id)
@@ -830,7 +844,11 @@ export const styleOf = (p: Project): Style => {
   const r = timeSavingsRatio(p)
   return r > 0.7 ? 'glass' : r < 0.3 ? 'brick' : 'mixed'
 }
-export const finalHeight = (p: Project) => Math.max(10, timeSaved(p) * VERTICAL_SCALE)
+export const finalHeight = (p: Project) => {
+  const hours = Math.max(0, timeSaved(p))
+  const floors = MAX_FLOORS * (1 - Math.exp(-Math.pow(hours / FLOOR_CURVE_HOURS, FLOOR_CURVE_POWER)))
+  return Math.max(10, floors * FLOOR_HEIGHT)
+}
 
 /** Project-name sign on the more camera-facing of the two visible walls of a
  * box. The text is drawn in the wall's own plane, so it foreshortens with the
@@ -974,7 +992,13 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   ctx.fillStyle = '#fff'; ctx.fillRect(bx - 4, cab.y - 6, 8, 6) // cab
   // hook cycling: lowers to building top, raises with material
   const cx = bx + (tip.x - bx) * 0.7
-  const phase = (Math.sin(time / 700) + 1) / 2
+  let seed = 2166136261
+  const sid = String(b.p.id)
+  for (let i = 0; i < sid.length; i++) seed = Math.imul(seed ^ sid.charCodeAt(i), 16777619)
+  seed >>>= 0
+  const offset = (seed % 6283) / 1000 // 0..2π radians
+  const period = 600 + ((seed >>> 13) % 300) // 600..900 ms
+  const phase = (Math.sin(time / period + offset) + 1) / 2
   const topY = base.y - top - 8
   const hookY = cab.y + 10 + (topY - cab.y - 10) * phase
   line(ctx, [[cx, cab.y + 1], [cx, hookY]], '#222', 1)
@@ -1044,7 +1068,7 @@ const carEdges = (placed: Placed[]): [V2, V2][] =>
     return pts.slice(0, -1).map((p, i) => [p, pts[i + 1]] as [V2, V2]).filter(([p, q]) => dist(p, q) >= 0.01)
   })
 
-export const carCountFor = (n: number) => (n < 1 ? 0 : Math.min(60, n * 4))
+export const carCountFor = (n: number) => (n < 1 ? 0 : Math.min(30, n * 2))
 
 export function makeCars(placed: Placed[]): Traffic[] {
   const count = carCountFor(placed.length)
