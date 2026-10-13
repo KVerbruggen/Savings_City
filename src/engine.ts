@@ -581,8 +581,6 @@ function drawProgressBar(ctx: Ctx, b: Placed, prog: number) {
   ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
 }
 
-const SWING_CYCLE = 16 // hook up/down cycles between swings
-
 function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   const { size } = b
   const at = frameOf(b)
@@ -612,10 +610,13 @@ function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   // Occasionally swing 25° counter-clockwise for ~2 hook cycles, then back.
   // Positive map rotation is clockwise on screen, so counter-clockwise is negative.
   const hookCycles = time / (2 * Math.PI * period) + offset / (2 * Math.PI)
-  const u = ((hookCycles % SWING_CYCLE) + SWING_CYCLE) % SWING_CYCLE
+  const cycle = 12 + ((seed >>> 8) % 19) // 12..30 hook cycles per crane, fixed
+  const u = ((hookCycles % cycle) + cycle) % cycle
+  const s0 = cycle - 6
   const ease = (x: number) => x * x * (3 - 2 * x)
-  const swing = ease(Math.min(1, Math.max(0, (u - 10) / 0.5))) * (1 - ease(Math.min(1, Math.max(0, (u - 12.5) / 0.5))))
-  const rot = JIB_SKEW - swing * 25 * Math.PI / 180
+  const swing = ease(Math.min(1, Math.max(0, (u - s0) / 0.5))) * (1 - ease(Math.min(1, Math.max(0, (u - s0 - 2.5) / 0.5))))
+  const variation = (((seed >>> 3) % 2001) / 1000 - 1) * 5 // -5..+5 degrees
+  const rot = JIB_SKEW - (5 + variation) * Math.PI / 180 - swing * 25 * Math.PI / 180
   const jx = dx * Math.cos(rot) - dy * Math.sin(rot)
   const jy = dx * Math.sin(rot) + dy * Math.cos(rot)
   const jibAt = (t: number) => {
