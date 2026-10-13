@@ -12,6 +12,11 @@ type Tool = 'none' | 'road' | 'delete'
 
 const HOME: Camera = { x: 0, y: 0, zoom: 1, angle: 0 }
 
+// Toggle from the console: `smoothRotation = true`
+declare global { interface Window { smoothRotation?: boolean } }
+window.smoothRotation ??= false
+const smoothRotation = () => !!window.smoothRotation
+
 interface Placing {
   id: string
   name: string
@@ -152,6 +157,7 @@ export default function App() {
     const k = zoom / cam.zoom
     camRef.current = { ...cam, zoom, x: dx - (dx - cam.x) * k, y: dy - (dy - cam.y) * k }
   }, [])
+  const buttonRot = useRef(0)
   const rotateBy = useCallback((degrees: number) => {
     const fullTurn = Math.PI * 2
     const angle = (camRef.current.angle + degrees * Math.PI / 180 + fullTurn) % fullTurn
@@ -180,6 +186,7 @@ export default function App() {
       if (typing(e) || !watched.test(e.code)) return
       if (e.code.startsWith('Arrow')) e.preventDefault()
       if (e.code === 'KeyQ' || e.code === 'KeyE') {
+        if (smoothRotation()) { down.add(e.code); return }
         if (e.repeat) return
         const quarter = Math.PI / 2
         const snapped = Math.round(camRef.current.angle / quarter) * quarter
@@ -196,8 +203,12 @@ export default function App() {
     const tick = (now: number) => {
       const dt = Math.min(50, now - last) / 16.67
       last = now
+      const has = (...codes: string[]) => codes.some((c) => down.has(c))
+      if (smoothRotation()) {
+        const dir = (has('KeyE') ? 1 : 0) - (has('KeyQ') ? 1 : 0) + buttonRot.current
+        if (dir) rotateBy(Math.sign(dir) * 2 * dt)
+      }
       if (down.size) {
-        const has = (...codes: string[]) => codes.some((c) => down.has(c))
         const dx = (has('ArrowLeft', 'KeyA') ? 1 : 0) - (has('ArrowRight', 'KeyD') ? 1 : 0)
         const dy = (has('ArrowUp', 'KeyW') ? 1 : 0) - (has('ArrowDown', 'KeyS') ? 1 : 0)
         if (dx || dy) {
@@ -423,6 +434,7 @@ export default function App() {
           ))}
           {projects.length === 0 && <p className="text-sm text-slate-500">No projects yet. Construct your first one!</p>}
         </section>
+
       </aside>
 
       <main className="relative min-w-0 flex-1">
@@ -470,8 +482,12 @@ export default function App() {
         <div className="absolute right-3 top-3 flex flex-col gap-1">
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1.2)} aria-label="Zoom in">+</button>
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out">−</button>
-          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => rotateBy(90)} aria-label="Rotate view left">↺</button>
-          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => rotateBy(-90)} aria-label="Rotate view right">↻</button>
+          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => { if (!smoothRotation()) rotateBy(90) }}
+            onPointerDown={() => { if (smoothRotation()) buttonRot.current = 1 }} onPointerUp={() => { buttonRot.current = 0 }}
+            onPointerLeave={() => { buttonRot.current = 0 }} onPointerCancel={() => { buttonRot.current = 0 }} aria-label="Rotate view left">↺</button>
+          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => { if (!smoothRotation()) rotateBy(-90) }}
+            onPointerDown={() => { if (smoothRotation()) buttonRot.current = -1 }} onPointerUp={() => { buttonRot.current = 0 }}
+            onPointerLeave={() => { buttonRot.current = 0 }} onPointerCancel={() => { buttonRot.current = 0 }} aria-label="Rotate view right">↻</button>
           <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => (camRef.current = { ...HOME })} aria-label="Recenter">⌖</button>
         </div>
         <div className="absolute bottom-4 left-4 flex flex-col items-start gap-3">

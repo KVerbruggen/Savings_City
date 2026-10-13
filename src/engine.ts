@@ -267,6 +267,9 @@ export function roadsToPrune(placed: Placed[], roads: Set<string>): string[] {
 
 /* ---------------- drawing ---------------- */
 
+/** Fixed sun direction in map space (unit-ish), independent of the camera angle. */
+const LIGHT_DIR: V2 = [0.97, 0.24]
+
 function shade(hex: string, f: number) {
   const n = parseInt(hex.slice(1), 16)
   const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)))
@@ -316,10 +319,20 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
   const next = corners[ni]
   const face = (from: typeof current, to: typeof current, fill: string) =>
     poly(ctx, [[from.x, from.y - z0], [to.x, to.y - z0], [to.x, to.y - top], [from.x, from.y - top]], fill)
+  const centre: V2 = [(A[0] + B[0] + C[0] + D[0]) / 4, (A[1] + B[1] + C[1] + D[1]) / 4]
+  const wallLight = (i: number, j: number) => {
+    const p = mapCorners[i], q = mapCorners[j]
+    const e = norm(sub(q, p))
+    let n: V2 = [e[1], -e[0]]
+    const mid: V2 = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]
+    if (n[0] * (mid[0] - centre[0]) + n[1] * (mid[1] - centre[1]) < 0) n = [-n[0], -n[1]]
+    return Math.max(0.45, 0.5 + 0.3 * (n[0] * LIGHT_DIR[0] + n[1] * LIGHT_DIR[1]))
+  }
+  const lightPrev = wallLight(pi, nearest), lightNext = wallLight(nearest, ni)
   ctx.save()
   if (opts.alpha !== undefined) ctx.globalAlpha = opts.alpha
-  face(previous, current, shade(color, 0.75))
-  face(current, next, shade(color, 0.55))
+  face(previous, current, shade(color, lightPrev))
+  face(current, next, shade(color, lightNext))
   if (opts.windows && height > 12) {
     ctx.fillStyle = opts.windows
     const rows = Math.floor(height / 12)
@@ -336,8 +349,9 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
         }
       }
     }
-    drawWindows(previous, current, dist(mapCorners[pi], mapCorners[nearest]), opts.windows)
-    drawWindows(current, next, dist(mapCorners[nearest], mapCorners[ni]), shade(opts.windows, 0.8))
+    const prevBrighter = lightPrev >= lightNext
+    drawWindows(previous, current, dist(mapCorners[pi], mapCorners[nearest]), prevBrighter ? opts.windows : shade(opts.windows, 0.8))
+    drawWindows(current, next, dist(mapCorners[nearest], mapCorners[ni]), prevBrighter ? shade(opts.windows, 0.8) : opts.windows)
   }
   // Draw the roof after facade details so it masks the wall at its top edge.
   poly(ctx, corners.map((q) => [q.x, q.y - top] as [number, number]), shade(color, 1.1))
@@ -619,11 +633,11 @@ const hash2 = (x: number, y: number, k: number) => {
 
 /** Scatter small grass blades over a map-space rectangle. Positions are hashed
  * from the grid cell, so the pattern is stable while panning and zooming. */
-function grassBlades(ctx: Ctx, x0: number, y0: number, x1: number, y1: number, accept?: (x: number, y: number) => boolean, light = false) {
+function grassBlades(ctx: Ctx, x0: number, y0: number, x1: number, y1: number, accept?: (x: number, y: number) => boolean, light = false, area = (x1 - x0) * (y1 - y0)) {
   const step = 0.3
   // When zoomed out, skip whole rows/columns of the fixed grid (in power-of-two
   // strides) rather than resizing it, so blades never shift against the map.
-  const cells = ((x1 - x0) / step) * ((y1 - y0) / step)
+  const cells = area / (step * step)
   let stride = 1
   while (cells / (stride * stride) > 12000) stride *= 2
   const shades = light ? ['#8fb87a', '#b9d9a3', '#7aa866'] : ['#5f9a4c', '#8cc274', '#4e8a3d']
@@ -668,7 +682,10 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   {
     const m = ((maxX - minX) + (maxY - minY)) / 4
     diamond(ctx, minX - m, minY - m, maxX - minX + 2 * m, maxY - minY + 2 * m, 0, '#7fb069')
-    grassBlades(ctx, minX, minY, maxX, maxY)
+    // Stride is based on the view's true area, which doesn't change with rotation
+    // (the bounding box does), so blades don't pop in and out while rotating.
+    const area = Math.abs(view.reduce((a, p, i) => { const q = view[(i + 1) % 4]; return a + p[0] * q[1] - q[0] * p[1] }, 0)) / 2
+    grassBlades(ctx, minX, minY, maxX, maxY, undefined, false, area)
   }
 
   // Faint grid while placing, so the edges are visible.
