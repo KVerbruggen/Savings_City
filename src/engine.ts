@@ -139,6 +139,11 @@ export function placementError(gx: number, gy: number, size: number, facing: Fac
     const verts = roadVertices(roads)
     if (!frontVertices(gx, gy, size, facing).some((v) => verts.has(v))) return 'The front must touch an existing road'
   }
+  const others = ignoreId ? placed.filter((b) => b.p.id !== ignoreId) : placed
+  if (others.length) {
+    const rect: [number, number, number, number] = [gx, gy, gx + size, gy + size]
+    if (!buildingReach(others).some((b) => gapBetween(rect, b.rect) <= b.reach)) return 'Too far from other buildings'
+  }
   return undefined
 }
 
@@ -219,10 +224,10 @@ export const roadsToDelete = (run: string[], roads: Set<string>): string[] => ru
 
 /** Run edges plus any roads left with no connection to a building: every
  * connected piece of road must contain an edge touching a building. */
-export function roadsToDeleteWithOrphans(run: string[], placed: Placed[], roads: Set<string>): string[] {
+export function roadsToDeleteWithOrphans(run: string[], placed: Placed[], roads: Set<string>, force = false): string[] {
   const fronts = new Set(placed.flatMap((b) => frontEdges(b.gx, b.gy, b.size, b.facing)))
   const gone = new Set(roadsToDelete(run, roads).filter((k) => !fronts.has(k)))
-  if (!gone.size) return []
+  if (!gone.size && !force) return []
   const left = [...roads].filter((k) => !gone.has(k))
   const tiles = occupied(placed)
   const touches = (key: string) => {
@@ -244,6 +249,20 @@ export function roadsToDeleteWithOrphans(run: string[], placed: Placed[], roads:
       for (const n of byVertex.get(v) ?? []) if (!keep.has(n)) { keep.add(n); stack.push(n) }
   }
   return [...gone, ...left.filter((k) => !keep.has(k))]
+}
+
+/** Roads that no longer satisfy the placement rules: out of reach of every
+ * building, or part of a road piece that touches no building. */
+export function roadsToPrune(placed: Placed[], roads: Set<string>): string[] {
+  const reach = buildingReach(placed)
+  const far = [...roads].filter((key) => {
+    const [a, b] = parseEdge(key)
+    const edge: [number, number, number, number] = [a[0], a[1], b[0], b[1]]
+    return !reach.some((r) => gapBetween(edge, r.rect) <= r.reach)
+  })
+  const farSet = new Set(far)
+  const rest = roadsToDeleteWithOrphans([], placed, new Set([...roads].filter((k) => !farSet.has(k))), true)
+  return [...far, ...rest]
 }
 
 /* ---------------- drawing ---------------- */

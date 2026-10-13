@@ -5,7 +5,7 @@ import {
 import {
   type Camera, type Facing, type Placed, type Preview, type Traffic,
   centerOn, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
-  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, screenToMap, styleOf, toIso,
+  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, styleOf, toIso,
 } from './engine'
 
 type Tool = 'none' | 'road' | 'delete'
@@ -18,6 +18,7 @@ interface Placing {
   size: number
   height: number
   facing: Facing
+  origin?: { gx: number; gy: number; facing: Facing }
 }
 
 export default function App() {
@@ -171,6 +172,55 @@ export default function App() {
     return () => cv.removeEventListener('wheel', wheel)
   }, [zoomBy])
 
+  useEffect(() => {
+    const down = new Set<string>()
+    const typing = (e: KeyboardEvent) => e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)
+    const watched = /^(Arrow(Up|Down|Left|Right)|Key[WASDQE]|Shift(Left|Right)|Control(Left|Right))$/
+    const onDown = (e: KeyboardEvent) => {
+      if (typing(e) || !watched.test(e.code)) return
+      if (e.code.startsWith('Arrow')) e.preventDefault()
+      if (e.code === 'KeyQ' || e.code === 'KeyE') {
+        if (e.repeat) return
+        const quarter = Math.PI / 2
+        const snapped = Math.round(camRef.current.angle / quarter) * quarter
+        camRef.current = { ...camRef.current, angle: snapped }
+        rotateBy(e.code === 'KeyE' ? 90 : -90)
+        return
+      }
+      down.add(e.code)
+    }
+    const onUp = (e: KeyboardEvent) => { down.delete(e.code) }
+    const clear = () => down.clear()
+    let raf = 0
+    let last = performance.now()
+    const tick = (now: number) => {
+      const dt = Math.min(50, now - last) / 16.67
+      last = now
+      if (down.size) {
+        const has = (...codes: string[]) => codes.some((c) => down.has(c))
+        const dx = (has('ArrowLeft', 'KeyA') ? 1 : 0) - (has('ArrowRight', 'KeyD') ? 1 : 0)
+        const dy = (has('ArrowUp', 'KeyW') ? 1 : 0) - (has('ArrowDown', 'KeyS') ? 1 : 0)
+        if (dx || dy) {
+          const cam = camRef.current
+          camRef.current = { ...cam, x: cam.x + dx * 10 * dt, y: cam.y + dy * 10 * dt }
+        }
+        const zoom = (has('ShiftLeft', 'ShiftRight') ? 1 : 0) - (has('ControlLeft', 'ControlRight') ? 1 : 0)
+        if (zoom) zoomBy(Math.pow(1.02, zoom * dt))
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    window.addEventListener('keydown', onDown)
+    window.addEventListener('keyup', onUp)
+    window.addEventListener('blur', clear)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('keydown', onDown)
+      window.removeEventListener('keyup', onUp)
+      window.removeEventListener('blur', clear)
+    }
+  }, [rotateBy, zoomBy])
+
   const rotateDoor = useCallback(() => {
     setPlacing((pl) => pl && { ...pl, facing: ((pl.facing + 1) % 4) as Facing })
   }, [])
@@ -178,6 +228,13 @@ export default function App() {
   const cancelPlacement = useCallback(async () => {
     const pl = stateRef.current.placing
     if (!pl) return
+    if (pl.origin) {
+      await dataService.update(pl.id, { gx: pl.origin.gx, gy: pl.origin.gy, facing: pl.origin.facing })
+      setProjects(await dataService.list())
+      setPlacing(undefined)
+      setPlaceError(undefined)
+      return
+    }
     // The project was just created; cancelling placement removes it again.
     await dataService.remove(pl.id)
     setProjects(await dataService.list())
@@ -217,6 +274,7 @@ export default function App() {
     const map = screenToMap(e.clientX - r.left, e.clientY - r.top, r.width, r.height, camRef.current)
     const edges = edgeRun(run.start, map)
     if (run.del) {
+      if (run.button === 2 && tool === 'delete') { setTool('none'); setPlaceError(undefined); return }
       const keys = roadsToDeleteWithOrphans(edges, placed, roads)
       if (!keys.length && run.button === 2 && tool === 'road' && !edges.some((k) => roads.has(k))) { setTool('none'); setPlaceError(undefined); return }
       if (keys.length) setRoads(new Set(await roadService.remove(keys)))
@@ -229,6 +287,11 @@ export default function App() {
     setPlaceError(undefined)
   }
 
+  const pruneRoads = async (list: Project[], current: Set<string>) => {
+    const bad = roadsToPrune(layout(list), current)
+    return bad.length ? new Set(await roadService.remove(bad)) : current
+  }
+
   const onClick = async (e: React.PointerEvent) => {
     const cv = canvasRef.current!
     const r = cv.getBoundingClientRect()
@@ -239,10 +302,14 @@ export default function App() {
       const error = placementError(gx, gy, placing.size, placing.facing, placed, roads)
       if (error) { setPlaceError(error); return }
       await dataService.update(placing.id, { gx, gy, facing: placing.facing })
-      setRoads(new Set(await roadService.add(frontEdges(gx, gy, placing.size, placing.facing))))
-      // Construction only starts once the building is placed.
-      constructionStartsRef.current.set(placing.id, performance.now() - startRef.current)
-      setStartsVersion((v) => v + 1)
+      const withFront = new Set(await roadService.add(frontEdges(gx, gy, placing.size, placing.facing)))
+      const list = await dataService.list()
+      setRoads(placing.origin ? await pruneRoads(list, withFront) : withFront)
+      // Construction only starts once the building is placed (moves keep their progress).
+      if (!placing.origin) {
+        constructionStartsRef.current.set(placing.id, performance.now() - startRef.current)
+        setStartsVersion((v) => v + 1)
+      }
       setProjects(await dataService.list())
       setPlacing(undefined)
       setPlaceError(undefined)
@@ -300,6 +367,17 @@ export default function App() {
     })
     setShowForm(true)
   }
+  const move = async (p: Project) => {
+    if (placing || typeof p.gx !== 'number' || typeof p.gy !== 'number') return
+    const origin = { gx: p.gx, gy: p.gy, facing: (p.facing ?? 2) as Facing }
+    await dataService.update(p.id, { gx: null, gy: null })
+    setProjects(await dataService.list())
+    setPlacing({ id: p.id, name: p.name, size: footprint(p), height: finalHeight(p), facing: origin.facing, origin })
+    setTool('none')
+    setRoadMenu(false)
+    setTip(undefined)
+    setPlaceError(undefined)
+  }
   const closeForm = () => {
     setShowForm(false)
     setEditingId(undefined)
@@ -338,8 +416,9 @@ export default function App() {
                 <div className="font-medium">{p.name}{p.gx === null && <span className="ml-1 text-xs text-amber-400">(placing…)</span>}</div>
                 <div className="text-xs text-slate-400">{timeSaved(p).toFixed(1)} h saved · {(timeSavingsRatio(p) * 100).toFixed(0)}%</div>
               </button>
+              <button aria-label="Move" title="Move" disabled={!!placing || p.gx === null} className="px-1 text-slate-400 hover:text-sky-300 disabled:opacity-40" onClick={() => void move(p)}>✥</button>
               <button aria-label="Edit" className="px-1 text-slate-400 hover:text-amber-300" onClick={() => edit(p)}>✎</button>
-              <button aria-label="Delete" className="px-1 text-slate-400 hover:text-red-400" onClick={async () => { await dataService.remove(p.id); setProjects(await dataService.list()); setTip(undefined) }}>✕</button>
+              <button aria-label="Delete" className="px-1 text-slate-400 hover:text-red-400" onClick={async () => { await dataService.remove(p.id); const list = await dataService.list(); setProjects(list); setRoads(await pruneRoads(list, roads)); setTip(undefined) }}>✕</button>
             </div>
           ))}
           {projects.length === 0 && <p className="text-sm text-slate-500">No projects yet. Construct your first one!</p>}
@@ -453,7 +532,8 @@ export default function App() {
         )}
         {tip && !placing && (
           <div ref={tipRef} className="pointer-events-none absolute w-56 rounded-lg border-2 border-amber-400 bg-slate-900/95 p-3 text-sm shadow-xl" style={{ left: tip.x, top: tip.y }}>
-            <div className="font-bold">{tip.b.p.name}</div>
+            <button aria-label="Move" title="Move" className="pointer-events-auto absolute right-2 top-2 h-7 w-7 rounded bg-slate-800 text-slate-300 hover:text-sky-300" onClick={() => void move(tip.b.p)}>✥</button>
+            <div className="pr-8 font-bold">{tip.b.p.name}</div>
             <div className="mb-1 text-xs text-slate-400">{tip.b.p.description}</div>
             <div>Hours saved: {timeSaved(tip.b.p).toFixed(1)}</div>
             <div>Hours spent with AI: {tip.b.p.time_spent_ai.toFixed(1)}</div>
