@@ -442,7 +442,7 @@ export default function App() {
           ref={canvasRef}
           className={`h-full w-full touch-none ${placing || tool !== 'none' ? 'cursor-crosshair' : 'cursor-grab'}`}
           onPointerDown={(e) => {
-            // Left pans/clicks (or starts a road run with a tool), middle always pans, right deletes runs (or rotates the door while placing).
+            // Left pans/clicks (or starts a road run with a tool), middle always pans, right deletes runs (or rotates the building while placing).
             if (e.button === 1) e.preventDefault()
             if (runRef.current) {
               if (e.button !== runRef.current.button) runRef.current = null
@@ -532,7 +532,7 @@ export default function App() {
           <div className="absolute left-1/2 top-3 w-80 -translate-x-1/2 rounded-lg border border-amber-400 bg-slate-900/95 px-4 py-2 text-sm shadow-xl">
             <div className="font-semibold">Click to place “{placing.name}”</div>
             <div className="text-xs text-slate-400">
-              The door’s road must connect to an existing road (the first building can go anywhere). R / right-click rotates the door, Esc cancels.
+              The door’s road must connect to an existing road (the first building can go anywhere). R / right-click to rotate, Esc cancels.
             </div>
             {placeError && <div className="mt-1 text-xs text-red-400">{placeError}</div>}
             <div className="mt-2 flex gap-2">

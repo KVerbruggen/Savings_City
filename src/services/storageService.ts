@@ -35,7 +35,32 @@ const uuid = () =>
         return (c === 'x' ? r : (r & 3) | 8).toString(16)
       })
 
+/** Current save format version. Bump whenever the saved data shape changes. */
+export const SAVE_VERSION = 1
+/** Oldest save version this build can still load. Saves older than this (or unversioned) are discarded. */
+export const MIN_COMPATIBLE_SAVE_VERSION = 1
+
+const VERSION_KEY = 'savings_city_save_version'
+const ROADS_KEY = 'savings_city_roads'
+let saveChecked = false
+
+function ensureCompatibleSave() {
+  if (saveChecked) return
+  saveChecked = true
+  try {
+    const raw = localStorage.getItem(VERSION_KEY)
+    const version = raw === null ? NaN : Number((JSON.parse(raw) as { version?: unknown }).version)
+    if (Number.isFinite(version) && version >= MIN_COMPATIBLE_SAVE_VERSION) return
+    localStorage.removeItem(KEY)
+    localStorage.removeItem(ROADS_KEY)
+    localStorage.setItem(VERSION_KEY, JSON.stringify({ version: SAVE_VERSION, minCompatible: MIN_COMPATIBLE_SAVE_VERSION }))
+  } catch { /* storage unavailable or corrupt version: treat as incompatible */
+    try { localStorage.removeItem(KEY); localStorage.removeItem(ROADS_KEY); localStorage.setItem(VERSION_KEY, JSON.stringify({ version: SAVE_VERSION, minCompatible: MIN_COMPATIBLE_SAVE_VERSION })) } catch { /* ignore */ }
+  }
+}
+
 function read(): Project[] {
+  ensureCompatibleSave()
   try {
     const raw = localStorage.getItem(KEY)
     if (raw !== null) return JSON.parse(raw) as Project[]
@@ -102,9 +127,9 @@ export interface RoadService {
   remove(keys: string[]): Promise<string[]>
 }
 
-const ROADS_KEY = 'savings_city_roads'
 const localRoadService: RoadService = {
   async list() {
+    ensureCompatibleSave()
     try {
       const raw = localStorage.getItem(ROADS_KEY)
       if (raw !== null) return JSON.parse(raw) as string[]
