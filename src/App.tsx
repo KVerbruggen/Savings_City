@@ -1,36 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  type Project, dataService, timeSaved, timeSavingsRatio,
+  type Project, dataService, roadService, timeSaved, timeSavingsRatio,
 } from './services/storageService'
 import {
-  type Camera, type Click, type Placed, type Preview, type Traffic, type V2, snapFree,
-  centerOn, finalHeight, fitBuilding, footprint, layout, makeCars, pick,
-  polyArea, render, screenToMap, snapGuided, snapPoint, styleOf, toIso, validatePlot, plotAreaCap, allowedStreets, streetPath, shallowJunction,
+  type Camera, type Facing, type Placed, type Preview, type Traffic,
+  centerOn, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
+  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, screenToMap, styleOf, toIso,
 } from './engine'
 
-const HOME: Camera = { x: 0, y: 0, zoom: 1, angle: 0 }
+type Tool = 'none' | 'road' | 'delete'
 
-/** Street attachment rule: corner 1 must sit on an existing street; corner 2
- * is auto-snapped onto the line through corner 1 parallel to its street (or
- * along either street meeting at a corner vertex), so it is always satisfied
- * once corner 1 is on a street. */
-function streetError(clicks: Click[], placed: Placed[]): string | undefined {
-  if (!placed.length) return undefined
-  // Corner 1 is always street-snapped (see the click handler), so this only
-  // guards the corner-2 path where a street ref must have been carried over.
-  if (!clicks[0]?.street) return 'The first corner must sit on an existing street'
-  // Corner 2 must lie on the legal side of the street run, so the first edge
-  // really follows part of an existing street instead of just touching a corner.
-  if (clicks.length >= 2 && !snapGuided(clicks[0], clicks[1].pt, placed).ok) return 'The first edge must follow an existing street'
-  return undefined
-}
+const HOME: Camera = { x: 0, y: 0, zoom: 1, angle: 0 }
 
 interface Placing {
   id: string
   name: string
   size: number
   height: number
-  clicks: Click[]
+  facing: Facing
 }
 
 export default function App() {
@@ -40,25 +27,28 @@ export default function App() {
   const [editingId, setEditingId] = useState<string>()
   const [selected, setSelected] = useState<string>()
   const [tip, setTip] = useState<{ b: Placed; x: number; y: number }>()
+  const tipRef = useRef<HTMLDivElement>(null)
+  const tipIdRef = useRef<string | undefined>(undefined)
+  tipIdRef.current = tip?.b.p.id
   const [placing, setPlacing] = useState<Placing>()
   const [placeError, setPlaceError] = useState<string>()
+  const [roads, setRoads] = useState<Set<string>>(new Set())
+  const [roadMenu, setRoadMenu] = useState(false)
+  const [tool, setTool] = useState<Tool>('none')
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const camRef = useRef<Camera>({ ...HOME })
   const startRef = useRef(0)
   const constructionStartsRef = useRef(new Map<string, number>())
   const [startsVersion, setStartsVersion] = useState(0)
-  // Read once per committed render; startsVersion forces a recompute after
-  // the map is mutated when a new building's construction starts.
-  // layout() uses the previous placements to keep fitted positions stable.
-  const placedRef = useRef<Placed[]>([])
+  // startsVersion forces a recompute after the map is mutated when a new
+  // building's construction starts.
   // oxlint-disable-next-line refs -- layout() only reads the map at call time; startsVersion re-triggers it after a mutation
-  const placed = useMemo(() => layout(projects, constructionStartsRef.current, placedRef.current),
+  const placed = useMemo(() => layout(projects, constructionStartsRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startsVersion intentionally invalidates this memo
     [projects, startsVersion])
-  placedRef.current = placed
   const carsRef = useRef<Traffic[]>([])
   const cursorRef = useRef({ x: -9999, y: -9999 })
-  const stateRef = useRef<{ placed: Placed[]; selected?: string; placing?: Placing }>({ placed: [] })
+  const stateRef = useRef<{ placed: Placed[]; roads: Set<string>; selected?: string; placing?: Placing; tool: Tool; roadMenu: boolean }>({ placed: [], roads: new Set(), tool: 'none', roadMenu: false })
 
   // Set the construction clock once on mount. Guarded so the double-invoked
   // effects of StrictMode do not reset it, and so the sync effect below (which
@@ -70,22 +60,25 @@ export default function App() {
 
   useEffect(() => {
     // Sync the mutable snapshot read by the render loop on every render.
-    stateRef.current = { placed, selected, placing }
+    stateRef.current = { placed, roads, selected, placing, tool, roadMenu }
   })
 
   useEffect(() => {
-    dataService.list().then((list) => {
+    dataService.list().then(async (loaded) => {
       // Reconstruct construction progress across reloads from the creation
       // timestamp. `elapsed` counts ms since page load, so a project created
       // `age` ms before the page loaded gets a negative start offset — its
       // progress is then correct (already finished, or part-way through a
       // long build). Recorded once per project so re-renders never reset it.
-      for (const p of list) {
+      for (const p of loaded) {
         if (constructionStartsRef.current.has(p.id)) continue
         const createdAt = Date.parse(p.created_at)
         const age = Number.isFinite(createdAt) ? Date.now() - createdAt : 0
         constructionStartsRef.current.set(p.id, -Math.max(0, age))
       }
+      const list = loaded
+      const known = new Set(await roadService.list())
+      setRoads(known)
       setProjects(list)
       // Start focused on the first building, so a city that grew away from
       // the origin still opens on the city instead of empty grass.
@@ -96,9 +89,9 @@ export default function App() {
   useEffect(() => {
     // Keep existing vehicles in place when a project is added; only create the
     // additional vehicles needed for the new roads/buildings.
-    const desired = makeCars(placed)
+    const desired = makeCars(placed, roads)
     carsRef.current = carsRef.current.length ? [...carsRef.current, ...desired.slice(carsRef.current.length)] : desired
-  }, [placed])
+  }, [placed, roads])
 
   // Render loop
   useEffect(() => {
@@ -111,58 +104,37 @@ export default function App() {
       const ctx = cv.getContext('2d')!
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       const cur = stateRef.current
-      // Live plot-placement preview: the polygon is re-validated every frame so
-      // the cursor-following corner always shows whether the shape is legal.
       let preview: Preview | undefined
-      if (cur.placing) {
+      if (cur.placing || cur.tool !== 'none') {
         const map = screenToMap(cursorRef.current.x, cursorRef.current.y, w, h, camRef.current)
-        const n = cur.placing.clicks.length
-        // Corners 1 & 2 are always pulled onto a street (so snaps are felt,
-        // not just validated at the end); corners 3+ are free with a small
-        // street snap. Corner 2 follows a street line away from the building.
-        let hover: Click
-        if (n === 0 && cur.placed.length > 0) {
-          // First corner: force onto the nearest street.
-          const s = snapPoint(map, cur.placed, Infinity)
-          hover = s.street ? s : snapPoint(map, cur.placed)
-        } else if (n === 1) {
-          const prev = cur.placing.clicks[0]
-          if (prev.street) hover = { pt: snapGuided(prev, map, cur.placed).pt, street: prev.street }
-          else hover = snapPoint(map, cur.placed)
+        if (cur.placing) {
+          const { size, height, facing } = cur.placing
+          const { gx, gy } = placementAt(map, size)
+          preview = { kind: 'building', gx, gy, size, height, facing, ok: !placementError(gx, gy, size, facing, cur.placed, cur.roads) }
         } else {
-          hover = snapFree(map, cur.placing.clicks.slice(0, Math.min(n, 3)), cur.placed)
-        }
-        const clicks = n >= 4 ? cur.placing.clicks : [...cur.placing.clicks, hover]
-        // Plots are always 4-sided: the polygon is just the clicked points.
-        const polygon = clicks.map((c) => c.pt)
-        // The first edge follows the streets through any junctions; compute its
-        // bends so the preview draws it bending instead of straight.
-        const edge12 = cur.placing.clicks[0]?.street && clicks.length >= 2
-          ? streetPath(cur.placing.clicks[0], clicks[1].pt, cur.placed)
-          : undefined
-        let ok = polygon.length >= 4
-        if (ok && cur.placed.length > 0 && streetError(clicks, cur.placed)) ok = false
-        const streetEdge: [V2, V2] | undefined = cur.placing.clicks[0]?.street && clicks.length >= 2
-          ? [clicks[0].pt, clicks[1].pt]
-          : undefined
-        if (ok && validatePlot(polygon, cur.placing.size, cur.placed.map((b) => b.plot), streetEdge)) ok = false
-        // Flag a would-be shallow junction as soon as a shape is forming, so
-        // its angle and arc can be drawn at the offending corner.
-        const junctionIssue = polygon.length >= 3
-          ? shallowJunction(polygon, cur.placed.map((b) => b.plot), streetEdge)
-          : undefined
-        // Show the plot size relative to the cap as soon as there is an area.
-        const areaPct = polygon.length >= 3 ? (polyArea(polygon) / plotAreaCap(cur.placing.size)) * 100 : undefined
-        preview = {
-          polygon, points: cur.placing.clicks.map((c) => c.pt), ok,
-          size: cur.placing.size, height: cur.placing.height, cursor: hover.pt, hover: hover.pt, areaPct,
-          streets: allowedStreets(cur.placing.clicks, cur.placed), edge12, junctionIssue,
+          const run = runRef.current
+          preview = {
+            kind: 'road',
+            mode: run?.del || cur.tool === 'delete' ? 'delete' : 'add',
+            edges: run ? edgeRun(run.start, map) : [nearestEdge(map)],
+          }
         }
       }
       render(ctx, w, h, {
-        placed: cur.placed, elapsed: now - startRef.current, time: now,
+        placed: cur.placed, roads: cur.roads, elapsed: now - startRef.current, time: now,
         cam: camRef.current, selected: cur.selected, cars: carsRef.current, preview,
       })
+      const tipEl = tipRef.current
+      if (tipEl && tipIdRef.current) {
+        const b = cur.placed.find((q) => q.p.id === tipIdRef.current)
+        if (b) {
+          const cam = camRef.current
+          const c = toIso(b.gx + b.size / 2, b.gy + b.size / 2, cam.angle)
+          const hgt = finalHeight(b.p) * Math.max(0, Math.min(1, progressOf(b, now - startRef.current)))
+          tipEl.style.left = `${w / 2 + cam.x + c.x * cam.zoom}px`
+          tipEl.style.top = `${h / 2 + cam.y + (c.y - hgt / 2) * cam.zoom}px`
+        }
+      }
       raf = requestAnimationFrame(frame)
     }
     raf = requestAnimationFrame(frame)
@@ -171,11 +143,11 @@ export default function App() {
 
   // Pan / zoom / click
   const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null)
-  const dragPoint = useRef<number | null>(null) // index of a placed corner being dragged
+  const runRef = useRef<{ start: string; del: boolean; button: number } | null>(null)
   const zoomBy = useCallback((f: number, dx = 0, dy = 0) => {
     // dx/dy: anchor offset from the view center; that point stays fixed on screen.
     const cam = camRef.current
-    const zoom = Math.min(3, Math.max(0.3, cam.zoom * f))
+    const zoom = Math.min(4.5, Math.max(0.3, cam.zoom * f))
     const k = zoom / cam.zoom
     camRef.current = { ...cam, zoom, x: dx - (dx - cam.x) * k, y: dy - (dy - cam.y) * k }
   }, [])
@@ -199,9 +171,8 @@ export default function App() {
     return () => cv.removeEventListener('wheel', wheel)
   }, [zoomBy])
 
-  const undoPoint = useCallback(() => {
-    setPlaceError(undefined)
-    setPlacing((pl) => pl && { ...pl, clicks: pl.clicks.slice(0, -1) })
+  const rotateDoor = useCallback(() => {
+    setPlacing((pl) => pl && { ...pl, facing: ((pl.facing + 1) % 4) as Facing })
   }, [])
 
   const cancelPlacement = useCallback(async () => {
@@ -216,14 +187,47 @@ export default function App() {
 
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && stateRef.current.placing) {
-        if (stateRef.current.placing.clicks.length) undoPoint()
-        else void cancelPlacement()
-      }
+      if (e.target instanceof HTMLElement && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)) return
+      if (e.key === 'Escape') {
+        if (runRef.current) runRef.current = null
+        else if (stateRef.current.placing) void cancelPlacement()
+        else if (stateRef.current.tool !== 'none') { setTool('none'); setPlaceError(undefined) }
+        else if (stateRef.current.roadMenu) setRoadMenu(false)
+      } else if ((e.key === 'r' || e.key === 'R') && stateRef.current.placing) rotateDoor()
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
-  }, [undoPoint, cancelPlacement])
+  }, [cancelPlacement, rotateDoor])
+
+  useEffect(() => {
+    if (!showForm) return
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      setShowForm(false)
+      setEditingId(undefined)
+      setForm({ name: '', description: '', ai: '', est: '', budget: '' })
+    }
+    window.addEventListener('keydown', key, true)
+    return () => window.removeEventListener('keydown', key, true)
+  }, [showForm])
+
+  const applyRun = async (e: React.PointerEvent, run: { start: string; del: boolean; button?: number }) => {
+    const r = canvasRef.current!.getBoundingClientRect()
+    const map = screenToMap(e.clientX - r.left, e.clientY - r.top, r.width, r.height, camRef.current)
+    const edges = edgeRun(run.start, map)
+    if (run.del) {
+      const keys = roadsToDeleteWithOrphans(edges, placed, roads)
+      if (!keys.length && run.button === 2 && tool === 'road' && !edges.some((k) => roads.has(k))) { setTool('none'); setPlaceError(undefined); return }
+      if (keys.length) setRoads(new Set(await roadService.remove(keys)))
+      setPlaceError(!keys.length && edges.some((k) => roads.has(k)) ? "Can't delete the road in front of a building" : undefined)
+      return
+    }
+    const keys = roadsToAdd(edges, placed, roads)
+    if (!keys.length) { setPlaceError(roadError(edges[0], placed, roads) ?? 'Cannot build a road here.'); return }
+    setRoads(new Set(await roadService.add(keys)))
+    setPlaceError(undefined)
+  }
 
   const onClick = async (e: React.PointerEvent) => {
     const cv = canvasRef.current!
@@ -231,39 +235,17 @@ export default function App() {
     const sx = e.clientX - r.left, sy = e.clientY - r.top
     if (placing) {
       const map = screenToMap(sx, sy, r.width, r.height, camRef.current)
-      const n = placing.clicks.length
-      let click: Click
-      if (n === 0 && placed.length > 0) {
-        const s = snapPoint(map, placed, Infinity)
-        click = s.street ? s : snapPoint(map, placed)
-      } else if (n === 1) {
-        const prev = placing.clicks[0]
-        if (prev.street) click = { pt: snapGuided(prev, map, placed).pt, street: prev.street }
-        else click = snapPoint(map, placed)
-      } else {
-        click = snapFree(map, placing.clicks.slice(0, Math.min(n, 3)), placed)
-      }
-      // With 4 corners down, further clicks adjust the last corner.
-      const clicks = placing.clicks.length >= 4 ? [...placing.clicks.slice(0, 3), click] : [...placing.clicks, click]
-      if (clicks.length === 4) {
-        const polygon = clicks.map((c) => c.pt)
-        const streetEdge: [V2, V2] | undefined = placing.clicks[0]?.street
-          ? [clicks[0].pt, clicks[1].pt]
-          : undefined
-        const error = (placed.length > 0 && streetError(clicks, placed)) || validatePlot(polygon, placing.size, placed.map((b) => b.plot), streetEdge)
-        if (!error) {
-          await dataService.update(placing.id, { plot: polygon })
-          // Construction only starts once the plot is chosen.
-          constructionStartsRef.current.set(placing.id, performance.now() - startRef.current)
-          setStartsVersion((v) => v + 1)
-          setProjects(await dataService.list())
-          setPlacing(undefined)
-          setPlaceError(undefined)
-          return
-        }
-        setPlaceError(error)
-      } else setPlaceError(undefined)
-      setPlacing({ ...placing, clicks })
+      const { gx, gy } = placementAt(map, placing.size)
+      const error = placementError(gx, gy, placing.size, placing.facing, placed, roads)
+      if (error) { setPlaceError(error); return }
+      await dataService.update(placing.id, { gx, gy, facing: placing.facing })
+      setRoads(new Set(await roadService.add(frontEdges(gx, gy, placing.size, placing.facing))))
+      // Construction only starts once the building is placed.
+      constructionStartsRef.current.set(placing.id, performance.now() - startRef.current)
+      setStartsVersion((v) => v + 1)
+      setProjects(await dataService.list())
+      setPlacing(undefined)
+      setPlaceError(undefined)
       return
     }
     const b = pick(placed, performance.now() - startRef.current, sx, sy, r.width, r.height, camRef.current)
@@ -284,26 +266,25 @@ export default function App() {
       // the elapsed time, so edits update the current building in place.
       const old = projects.find((p) => p.id === editingId)
       const updated = old && { ...old, ...values }
-      const outgrown = !!updated?.plot && !!old?.plot && (() => {
-        const size = footprint(updated)
-        return polyArea(updated.plot!) > plotAreaCap(size) || !fitBuilding(updated.plot!, size)
-      })()
-      if (outgrown && updated) {
-        // The building outgrew its plot: clear the plot and make the user re-place it.
-        await dataService.update(editingId, { ...values, plot: null })
+      const resized = !!old && !!updated && typeof old.gx === 'number' && footprint(updated) !== footprint(old)
+      if (resized && updated) {
+        // The footprint tier changed: clear the position and make the user re-place it.
+        await dataService.update(editingId, { ...values, gx: null, gy: null })
         setProjects(await dataService.list())
-        setPlacing({ id: updated.id, name: updated.name, size: footprint(updated), height: finalHeight(updated), clicks: [] })
-        setPlaceError('The building outgrew its plot. Place it again.')
+        setPlacing({ id: updated.id, name: updated.name, size: footprint(updated), height: finalHeight(updated), facing: updated.facing ?? 2 })
+        setPlaceError('The building changed size. Place it again.')
       } else {
         await dataService.update(editingId, values)
         setProjects(await dataService.list())
       }
     } else {
-      // plot: null marks the project as awaiting placement, so it stays
-      // invisible until the user has picked its corners on the map.
-      const created = await dataService.create({ ...values, plot: null })
+      // gx: null marks the project as awaiting placement, so it stays
+      // invisible until the user has placed it on the map.
+      const created = await dataService.create({ ...values, gx: null, gy: null, facing: 2 })
       setProjects(await dataService.list())
-      setPlacing({ id: created.id, name: created.name, size: footprint(created), height: finalHeight(created), clicks: [] })
+      setPlacing({ id: created.id, name: created.name, size: footprint(created), height: finalHeight(created), facing: 2 })
+      setTool('none')
+      setRoadMenu(false)
       setPlaceError(undefined)
     }
     setForm({ name: '', description: '', ai: '', est: '', budget: '' })
@@ -340,7 +321,7 @@ export default function App() {
     <div className="flex h-full bg-slate-900 text-slate-100">
       <aside className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-slate-700 p-4">
         <h1 className="text-2xl font-bold">🏙️ Savings City</h1>
-        <button onClick={() => setShowForm(true)} disabled={!!placing} className="rounded bg-amber-500 py-2 font-semibold text-slate-900 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50">Construct Project</button>
+
 
         <section className="rounded bg-slate-800 p-3">
           <div className="text-xs uppercase text-slate-400">Total time saved</div>
@@ -354,7 +335,7 @@ export default function App() {
           {[...projects].reverse().map((p) => (
             <div key={p.id} className={`flex items-center justify-between rounded px-2 py-1 text-sm ${selected === p.id ? 'bg-slate-600' : 'bg-slate-800 hover:bg-slate-700'}`}>
               <button className="flex-1 text-left" onClick={() => focus(p.id)}>
-                <div className="font-medium">{p.name}{p.plot === null && <span className="ml-1 text-xs text-amber-400">(placing…)</span>}</div>
+                <div className="font-medium">{p.name}{p.gx === null && <span className="ml-1 text-xs text-amber-400">(placing…)</span>}</div>
                 <div className="text-xs text-slate-400">{timeSaved(p).toFixed(1)} h saved · {(timeSavingsRatio(p) * 100).toFixed(0)}%</div>
               </button>
               <button aria-label="Edit" className="px-1 text-slate-400 hover:text-amber-300" onClick={() => edit(p)}>✎</button>
@@ -368,38 +349,27 @@ export default function App() {
       <main className="relative min-w-0 flex-1">
         <canvas
           ref={canvasRef}
-          className={`h-full w-full touch-none ${placing ? 'cursor-crosshair' : 'cursor-grab'}`}
+          className={`h-full w-full touch-none ${placing || tool !== 'none' ? 'cursor-crosshair' : 'cursor-grab'}`}
           onPointerDown={(e) => {
-            // Only the left button interacts; the right button is for undo.
-            if (e.button !== 0) return
-            const r = e.currentTarget.getBoundingClientRect()
-            const pl = stateRef.current.placing
-            if (pl) {
-              // Grabbing (near) an existing corner moves it instead of panning.
-              const map = screenToMap(e.clientX - r.left, e.clientY - r.top, r.width, r.height, camRef.current)
-              const i = pl.clicks.findIndex((c) => Math.hypot(c.pt[0] - map[0], c.pt[1] - map[1]) < 0.35)
-              if (i >= 0) {
-                dragPoint.current = i
-                ;(e.target as Element).setPointerCapture(e.pointerId)
-                return
-              }
+            // Left pans/clicks (or starts a road run with a tool), middle always pans, right deletes runs (or rotates the door while placing).
+            if (e.button === 1) e.preventDefault()
+            if (runRef.current) {
+              if (e.button !== runRef.current.button) runRef.current = null
+              return
             }
-            drag.current = { x: e.clientX, y: e.clientY, moved: false }
+            const run = !placing && tool !== 'none' && (e.button === 0 || e.button === 2)
+            if (run) {
+              const r = e.currentTarget.getBoundingClientRect()
+              const map = screenToMap(e.clientX - r.left, e.clientY - r.top, r.width, r.height, camRef.current)
+              runRef.current = { start: nearestEdge(map), del: e.button === 2 || tool === 'delete', button: e.button }
+            } else if (e.button === 1 || (e.button === 0 && tool === 'none') || (e.button === 0 && placing)) {
+              drag.current = { x: e.clientX, y: e.clientY, moved: false }
+            } else return
             ;(e.target as Element).setPointerCapture(e.pointerId)
           }}
           onPointerMove={(e) => {
             const r = e.currentTarget.getBoundingClientRect()
             cursorRef.current = { x: e.clientX - r.left, y: e.clientY - r.top }
-            // Dragging a placed corner snaps it like a fresh click would.
-            if (dragPoint.current !== null && stateRef.current.placing) {
-              const pl = stateRef.current.placing
-              const map = screenToMap(cursorRef.current.x, cursorRef.current.y, r.width, r.height, camRef.current)
-              const click = snapPoint(map, placed)
-              const clicks = pl.clicks.map((c, i) => (i === dragPoint.current ? click : c))
-              setPlacing({ ...pl, clicks })
-              setPlaceError(undefined)
-              return
-            }
             const d = drag.current
             if (!d) return
             const dx = e.clientX - d.x, dy = e.clientY - d.y
@@ -408,12 +378,15 @@ export default function App() {
             d.x = e.clientX; d.y = e.clientY
           }}
           onPointerUp={(e) => {
-            if (e.button !== 0) { drag.current = null; return }
-            if (dragPoint.current !== null) { dragPoint.current = null; return }
-            if (drag.current && !drag.current.moved) void onClick(e)
-            drag.current = null
+            const run = runRef.current
+            if (run) {
+              if (e.button === run.button) { runRef.current = null; void applyRun(e, run) }
+              return
+            }
+            if (e.button === 0 && drag.current && !drag.current.moved) void onClick(e)
+            if (e.button === 0 || e.button === 1) drag.current = null
           }}
-          onContextMenu={(e) => { e.preventDefault(); if (placing) undoPoint() }}
+          onContextMenu={(e) => { e.preventDefault(); if (placing) rotateDoor() }}
         />
         <div className="absolute right-3 top-3 flex flex-col gap-1">
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1.2)} aria-label="Zoom in">+</button>
@@ -422,24 +395,64 @@ export default function App() {
           <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => rotateBy(-90)} aria-label="Rotate view right">↻</button>
           <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => (camRef.current = { ...HOME })} aria-label="Recenter">⌖</button>
         </div>
+        <div className="absolute bottom-4 left-4 flex flex-col items-start gap-3">
+          {roadMenu && !placing && tool !== 'none' && (
+            <p className="w-64 rounded-lg bg-slate-900/90 px-3 py-2 text-xs text-slate-300 shadow-lg">
+              {tool === 'road'
+                ? 'Click or drag along a grid edge next to a building to add roads. Right-click (or drag) deletes.'
+                : 'Click or drag along roads to delete them.'} Middle-drag to pan.
+            </p>
+          )}
+          {roadMenu && !placing && (
+            <div className="flex gap-3">
+              {(['road', 'delete'] as const).map((t) => (
+                <button
+                  key={t}
+                  title={t === 'road' ? 'Road tool' : 'Delete tool'}
+                  aria-label={t === 'road' ? 'Road tool' : 'Delete tool'}
+                  onClick={() => { setTool(tool === t ? 'none' : t); setPlaceError(undefined) }}
+                  className={`h-11 w-11 rounded-full text-xl shadow-lg ${tool === t ? 'bg-sky-500 text-slate-900 hover:bg-sky-400' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+                >{t === 'road' ? '➕' : '🗑️'}</button>
+              ))}
+            </div>
+          )}
+          <div className="flex gap-3">
+            <button
+              title="Construct Project"
+              aria-label="Construct Project"
+              onClick={() => { setTool('none'); setRoadMenu(false); setPlaceError(undefined); setShowForm(true) }}
+              disabled={!!placing}
+              className="h-14 w-14 rounded-full bg-amber-500 text-2xl shadow-lg hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
+            >🏗️</button>
+            <button
+              title="Roads"
+              aria-label="Roads"
+              onClick={() => { setTool(roadMenu ? 'none' : 'road'); setRoadMenu(!roadMenu); setPlaceError(undefined) }}
+              disabled={!!placing}
+              className={`h-14 w-14 rounded-full text-2xl shadow-lg disabled:cursor-not-allowed disabled:opacity-50 ${roadMenu ? 'bg-sky-500 hover:bg-sky-400' : 'bg-slate-800/90 hover:bg-slate-700'}`}
+            >🛣️</button>
+          </div>
+        </div>
         {placing && (
           <div className="absolute left-1/2 top-3 w-80 -translate-x-1/2 rounded-lg border border-amber-400 bg-slate-900/95 px-4 py-2 text-sm shadow-xl">
-            <div className="font-semibold">Place “{placing.name}” — click 4 corners ({placing.clicks.length}/4)</div>
+            <div className="font-semibold">Click to place “{placing.name}”</div>
             <div className="text-xs text-slate-400">
-              {placed.length === 0
-                ? 'The first building can be placed anywhere.'
-                : 'The first corner must sit on an existing street (plot edges snap).'}{' '}
-              Drag a corner to move it, right-click to undo, Esc to cancel.
+              The door’s road must connect to an existing road (the first building can go anywhere). R / right-click rotates the door, Esc cancels.
             </div>
             {placeError && <div className="mt-1 text-xs text-red-400">{placeError}</div>}
             <div className="mt-2 flex gap-2">
-              <button onClick={undoPoint} disabled={!placing.clicks.length} className="rounded border border-slate-500 px-3 py-1 text-xs hover:bg-slate-700 disabled:opacity-40">Undo point</button>
+              <button onClick={rotateDoor} className="rounded border border-slate-500 px-3 py-1 text-xs hover:bg-slate-700">Rotate door</button>
               <button onClick={() => void cancelPlacement()} className="rounded border border-slate-500 px-3 py-1 text-xs hover:bg-slate-700">Cancel</button>
             </div>
           </div>
         )}
+        {tool !== 'none' && !placing && placeError && (
+          <div className="absolute left-1/2 top-3 w-80 -translate-x-1/2 rounded-lg border border-amber-400 bg-slate-900/95 px-4 py-2 text-sm shadow-xl">
+            <div className="text-xs text-red-400">{placeError}</div>
+          </div>
+        )}
         {tip && !placing && (
-          <div className="pointer-events-none absolute w-56 rounded-lg border-2 border-amber-400 bg-slate-900/95 p-3 text-sm shadow-xl" style={{ left: Math.min(tip.x + 12, 9999), top: tip.y + 12 }}>
+          <div ref={tipRef} className="pointer-events-none absolute w-56 rounded-lg border-2 border-amber-400 bg-slate-900/95 p-3 text-sm shadow-xl" style={{ left: tip.x, top: tip.y }}>
             <div className="font-bold">{tip.b.p.name}</div>
             <div className="mb-1 text-xs text-slate-400">{tip.b.p.description}</div>
             <div>Hours saved: {timeSaved(tip.b.p).toFixed(1)}</div>

@@ -7,11 +7,13 @@ export interface Project {
   budget_spent: number
   created_at: string
   /**
-   * Free-form plot boundary in map coordinates (4-5 points).
-   * undefined = legacy project placed on the old lattice,
-   * null = created but waiting for the user to pick a plot.
+   * Integer grid tile of the footprint's min corner.
+   * null/undefined = created but waiting for the user to place it.
    */
-  plot?: [number, number][] | null
+  gx?: number | null
+  gy?: number | null
+  /** Door side: 0 = -y, 1 = +x, 2 = +y, 3 = -x. Defaults to 2. */
+  facing?: 0 | 1 | 2 | 3
 }
 
 export type NewProject = Omit<Project, 'id' | 'created_at'>
@@ -93,6 +95,70 @@ export const dataService: DataService = useSupabase
   ? supabaseDataService(env.VITE_SUPABASE_URL, env.VITE_SUPABASE_ANON_KEY)
   : localDataService
 
+/** Roads are unit grid edge keys ("x,y,h" / "x,y,v"). */
+export interface RoadService {
+  list(): Promise<string[]>
+  add(keys: string[]): Promise<string[]>
+  remove(keys: string[]): Promise<string[]>
+}
+
+const ROADS_KEY = 'savings_city_roads'
+const localRoadService: RoadService = {
+  async list() {
+    try {
+      const raw = localStorage.getItem(ROADS_KEY)
+      if (raw !== null) return JSON.parse(raw) as string[]
+    } catch { /* ignore */ }
+    return []
+  },
+  async add(keys) {
+    const all = [...new Set([...(await this.list()), ...keys])]
+    try { localStorage.setItem(ROADS_KEY, JSON.stringify(all)) } catch { /* storage unavailable */ }
+    return all
+  },
+  async remove(keys) {
+    const gone = new Set(keys)
+    const all = (await this.list()).filter((k) => !gone.has(k))
+    try { localStorage.setItem(ROADS_KEY, JSON.stringify(all)) } catch { /* storage unavailable */ }
+    return all
+  },
+}
+
+/** Supabase `roads` table with a unique text `key` column; duplicates are ignored on insert. */
+function supabaseRoadService(url: string, key: string): RoadService {
+  const base = `${url.replace(/\/$/, '')}/rest/v1/roads`
+  const headers = { apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }
+  const list = async (): Promise<string[]> => {
+    const res = await fetch(`${base}?select=key`, { headers })
+    if (!res.ok) throw new Error(`Supabase error ${res.status}`)
+    return ((await res.json()) as { key: string }[]).map((r) => r.key)
+  }
+  return {
+    list,
+    async add(keys) {
+      if (keys.length) {
+        const res = await fetch(`${base}?on_conflict=key`, {
+          method: 'POST',
+          headers: { ...headers, Prefer: 'resolution=ignore-duplicates,return=minimal' },
+          body: JSON.stringify([...new Set(keys)].map((k) => ({ key: k }))),
+        })
+        if (!res.ok) throw new Error(`Supabase error ${res.status}`)
+      }
+      return list()
+    },
+    async remove(keys) {
+      if (keys.length) {
+        const res = await fetch(`${base}?key=in.(${keys.map((k) => `"${k}"`).join(',')})`, { method: 'DELETE', headers })
+        if (!res.ok) throw new Error(`Supabase error ${res.status}`)
+      }
+      return list()
+    },
+  }
+}
+
+export const roadService: RoadService = useSupabase
+  ? supabaseRoadService(env.VITE_SUPABASE_URL, env.VITE_SUPABASE_ANON_KEY)
+  : localRoadService
 // Virtual fields
 export const timeSaved = (p: Project) => p.time_estimated_no_ai - p.time_spent_ai
 export const timeSavingsRatio = (p: Project) =>
