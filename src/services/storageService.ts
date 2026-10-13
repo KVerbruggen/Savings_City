@@ -6,6 +6,12 @@ export interface Project {
   time_estimated_no_ai: number
   budget_spent: number
   created_at: string
+  /**
+   * Free-form plot boundary in map coordinates (4-5 points).
+   * undefined = legacy project placed on the old lattice,
+   * null = created but waiting for the user to pick a plot.
+   */
+  plot?: [number, number][] | null
 }
 
 export type NewProject = Omit<Project, 'id' | 'created_at'>
