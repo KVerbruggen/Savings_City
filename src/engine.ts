@@ -581,6 +581,8 @@ function drawProgressBar(ctx: Ctx, b: Placed, prog: number) {
   ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
 }
 
+const SWING_CYCLE = 16 // hook up/down cycles between swings
+
 function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   const { size } = b
   const at = frameOf(b)
@@ -601,8 +603,21 @@ function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   const bw = at(CRANE_X, CRANE_Y), cw = at(size / 2, size / 2)
   const JIB_SKEW = 15 * Math.PI / 180 // keeps the jib from ever lining up exactly with the camera axis
   const dx = cw[0] - bw[0], dy = cw[1] - bw[1]
-  const jx = dx * Math.cos(JIB_SKEW) - dy * Math.sin(JIB_SKEW)
-  const jy = dx * Math.sin(JIB_SKEW) + dy * Math.cos(JIB_SKEW)
+  let seed = 2166136261
+  const sid = String(b.p.id)
+  for (let i = 0; i < sid.length; i++) seed = Math.imul(seed ^ sid.charCodeAt(i), 16777619)
+  seed >>>= 0
+  const offset = (seed % 6283) / 1000 // 0..2π radians
+  const period = 600 + ((seed >>> 13) % 300) // 600..900 ms
+  // Occasionally swing 25° counter-clockwise for ~2 hook cycles, then back.
+  // Positive map rotation is clockwise on screen, so counter-clockwise is negative.
+  const hookCycles = time / (2 * Math.PI * period) + offset / (2 * Math.PI)
+  const u = ((hookCycles % SWING_CYCLE) + SWING_CYCLE) % SWING_CYCLE
+  const ease = (x: number) => x * x * (3 - 2 * x)
+  const swing = ease(Math.min(1, Math.max(0, (u - 10) / 0.5))) * (1 - ease(Math.min(1, Math.max(0, (u - 12.5) / 0.5))))
+  const rot = JIB_SKEW - swing * 25 * Math.PI / 180
+  const jx = dx * Math.cos(rot) - dy * Math.sin(rot)
+  const jy = dx * Math.sin(rot) + dy * Math.cos(rot)
   const jibAt = (t: number) => {
     const q = toIso(bw[0] + jx * t, bw[1] + jy * t)
     return { x: q.x, gy: q.y, y: q.y - 2 - mast }
@@ -613,12 +628,6 @@ function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
   // hook cycling: lowers to building top, raises with material
   const hp = jibAt(0.9)
   const cx = hp.x
-  let seed = 2166136261
-  const sid = String(b.p.id)
-  for (let i = 0; i < sid.length; i++) seed = Math.imul(seed ^ sid.charCodeAt(i), 16777619)
-  seed >>>= 0
-  const offset = (seed % 6283) / 1000 // 0..2π radians
-  const period = 600 + ((seed >>> 13) % 300) // 600..900 ms
   const phase = (Math.sin(time / period + offset) + 1) / 2
   const topY = hp.gy - top - 8
   const hookY = hp.y + 10 + (topY - hp.y - 10) * phase
@@ -807,6 +816,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   // Advance each car as a small queue per edge. Cars reduce their speed when
   // another car is too close ahead on the same edge in the same direction.
   const previous = s.cars.map((car) => car.t)
+  const previousSpeed = s.cars.map((car) => car.speed)
   s.cars.forEach((car, index) => {
     if (!edges.length) return
     const sameSeg = (f: [V2, V2], g: [V2, V2]) =>
@@ -821,16 +831,32 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
     const L = Math.max(0.001, dist(e[0], e[1]))
     const dt = car.lastTime ? Math.min(80, s.time - car.lastTime) / 1000 : 0
     const sameLane = s.cars.filter((other, j) => j !== index && other.edge === car.edge && other.dir === car.dir)
-    const ahead = Math.min(...sameLane.map((other) => {
+    let ahead = 1
+    let leader: Traffic | undefined
+    for (const other of sameLane) {
       const otherIndex = s.cars.indexOf(other)
       const d = previous[otherIndex] - previous[index]
       // Only cars further along this street block us (streets aren't loops); ties go to the lower index so nobody deadlocks.
-      return d > 0 || (d === 0 && otherIndex < index) ? d : 1
-    }), 1)
+      if ((d > 0 || (d === 0 && otherIndex < index)) && d < ahead) { ahead = d; leader = other }
+    }
     const gap = ahead * L
-    const blocked = ahead < 1
-    car.speed = blocked && gap < 1.2 ? 0 : blocked ? Math.min(car.baseSpeed, car.baseSpeed * Math.max(0.25, (gap - 0.8) / 1.5)) : car.baseSpeed
+    if (leader) {
+      // Match the leader's pace instead of stopping; close the gap to a quarter of the old following distance.
+      const leaderSpeed = Math.min(car.baseSpeed, previousSpeed[s.cars.indexOf(leader)] || leader.baseSpeed)
+      const t = Math.min(1, Math.max(0, (gap - 0.3) / 0.75))
+      car.speed = leaderSpeed + (car.baseSpeed - leaderSpeed) * t
+    } else car.speed = car.baseSpeed
+    // Ease toward the target speed so following cars don't surge and brake.
+    const prevSpeed = previousSpeed[index] || car.baseSpeed
+    const maxStep = car.baseSpeed * 0.5 * dt
+    car.speed = prevSpeed + Math.max(-maxStep, Math.min(maxStep, car.speed - prevSpeed))
     car.t += (dt * car.speed) / L
+    if (leader) {
+      // Hard floor on the gap so frame-order effects can't let the car creep up on the leader.
+      const li = s.cars.indexOf(leader)
+      const limit = previous[li] + (dt * (previousSpeed[li] || 0)) / L - 0.3 / L
+      car.t = Math.max(previous[index], Math.min(car.t, limit))
+    }
     car.lastTime = s.time
     if (car.t >= 1) {
       // Reached a junction: pick a random street leaving it (no U-turn unless dead end).
