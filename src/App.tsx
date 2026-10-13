@@ -34,6 +34,7 @@ export default function App() {
   const [selected, setSelected] = useState<string>()
   const [tip, setTip] = useState<{ b: Placed; x: number; y: number }>()
   const tipRef = useRef<HTMLDivElement>(null)
+  const statsRef = useRef<HTMLPreElement>(null)
   const tipIdRef = useRef<string | undefined>(undefined)
   tipIdRef.current = tip?.b.p.id
   const [placing, setPlacing] = useState<Placing>()
@@ -108,6 +109,7 @@ export default function App() {
   useEffect(() => {
     const cv = canvasRef.current!
     let raf = 0
+    const statsAcc = { last: 0, windowStart: 0, frames: 0, worst: 0, renderTotal: 0, renderMax: 0 }
     const frame = (now: number) => {
       const dpr = window.devicePixelRatio || 1
       const w = cv.clientWidth, h = cv.clientHeight
@@ -131,10 +133,27 @@ export default function App() {
           }
         }
       }
+      const renderStart = performance.now()
       render(ctx, w, h, {
         placed: cur.placed, roads: cur.roads, elapsed: now - startRef.current, time: now,
         cam: camRef.current, selected: cur.selected, cars: carsRef.current, preview,
       })
+      const st = statsAcc
+      const renderMs = performance.now() - renderStart
+      if (st.last) st.worst = Math.max(st.worst, now - st.last)
+      st.last = now
+      st.frames++
+      st.renderTotal += renderMs
+      st.renderMax = Math.max(st.renderMax, renderMs)
+      if (!st.windowStart) st.windowStart = now
+      if (now - st.windowStart >= 500 && statsRef.current) {
+        const secs = (now - st.windowStart) / 1000
+        statsRef.current.textContent =
+          `${(st.frames / secs).toFixed(0)} fps · frame ${(1000 * secs / st.frames).toFixed(1)} ms (worst ${st.worst.toFixed(0)})\n` +
+          `render ${(st.renderTotal / st.frames).toFixed(1)} ms (max ${st.renderMax.toFixed(1)})\n` +
+          `${cur.placed.length} buildings · ${carsRef.current.length} cars · ${cur.roads.size} roads`
+        st.frames = 0; st.renderTotal = 0; st.renderMax = 0; st.worst = 0; st.windowStart = now
+      }
       const tipEl = tipRef.current
       if (tipEl && tipIdRef.current) {
         const b = cur.placed.find((q) => q.p.id === tipIdRef.current)
@@ -498,6 +517,7 @@ export default function App() {
           }}
           onContextMenu={(e) => { e.preventDefault(); if (placing) rotateDoor() }}
         />
+        <pre ref={statsRef} className="pointer-events-none absolute left-3 top-3 rounded bg-slate-900/80 px-2 py-1 font-mono text-xs leading-snug text-emerald-300" />
         <div className="absolute right-3 top-3 flex flex-col gap-1">
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1.2)} aria-label="Zoom in">+</button>
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out">−</button>

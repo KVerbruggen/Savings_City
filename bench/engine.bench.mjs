@@ -15,6 +15,8 @@ const placed = e.layout(projects)
 
 const noop = () => {}
 const ctx = new Proxy({}, { get: (t, k) => k === 'createLinearGradient' ? () => ({ addColorStop: noop }) : k === 'measureText' ? () => ({ width: 10 }) : (t[k] ?? noop), set: (t, k, v) => (t[k] = v, true) })
+globalThis.document = { createElement: () => ({ getContext: () => ctx }) }
+ctx.canvas = { width: 1600, height: 900 }
 globalThis.Path2D = class { moveTo() {} lineTo() {} }
 
 const bench = (name, n, fn) => {
@@ -42,5 +44,6 @@ bench('ground+roads only', 50, () => e.render(ctx, 1600, 900, { ...mk(1000), pla
 bench('buildings only finished', 50, () => e.render(ctx, 1600, 900, { ...mk(1e12), roads: new Set(), cars: [] }))
 bench('buildings only constructing', 50, () => e.render(ctx, 1600, 900, { ...mk(1000), roads: new Set(), cars: [] }))
 await server.close()
+
 
 

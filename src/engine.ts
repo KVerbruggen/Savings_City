@@ -762,36 +762,78 @@ const hash2 = (x: number, y: number, k: number) => {
 
 /** Scatter small grass blades over a map-space rectangle. Positions are hashed
  * from the grid cell, so the pattern is stable while panning and zooming. */
-function grassBlades(ctx: Ctx, x0: number, y0: number, x1: number, y1: number, accept?: (x: number, y: number) => boolean, light = false, area = (x1 - x0) * (y1 - y0)) {
-  const step = 0.3
-  // When zoomed out, skip whole rows/columns of the fixed grid (in power-of-two
-  // strides) rather than resizing it, so blades never shift against the map.
-  const cells = area / (step * step)
-  let stride = 1
-  while (cells / (stride * stride) > 12000) stride *= 2
-  const shades = light ? ['#8fb87a', '#b9d9a3', '#7aa866'] : ['#5f9a4c', '#8cc274', '#4e8a3d']
+/* Repeating grass texture. Blade bases sit on a cell grid in projected (screen-plane) coordinates that
+ * wraps every GRASS_W x GRASS_H units, so one pre-drawn tile covers the whole map and panning or
+ * zooming only moves a pattern. Because it lives in the projected plane it does not rotate with
+ * the map. */
+const GRASS_W = 1024, GRASS_H = 512, GRASS_NX = 107, GRASS_NY = 54
+const GRASS_DENSITY = 0.3 // fraction of cells that get a blade
+const GRASS_SCALES = [1, 2, 0.5]
+const grassTiles = new Map<number, HTMLCanvasElement>()
+let grassWarmup = false
+
+function buildGrassTile(scale: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.round(GRASS_W * scale); canvas.height = Math.round(GRASS_H * scale)
+  const c = canvas.getContext('2d')!
+  c.scale(scale, scale)
+  const cw = GRASS_W / GRASS_NX, ch = GRASS_H / GRASS_NY
+  const shades = ['#5f9a4c', '#8cc274', '#4e8a3d']
   const paths = shades.map(() => new Path2D())
-  for (let gx = Math.floor(x0 / step / stride) * stride; gx <= Math.ceil(x1 / step); gx += stride) {
-    for (let gy = Math.floor(y0 / step / stride) * stride; gy <= Math.ceil(y1 / step); gy += stride) {
-      if (hash2(gx, gy, 1) > 0.6) continue
-      const x = (gx + hash2(gx, gy, 2)) * step, y = (gy + hash2(gx, gy, 3)) * step
-      if (accept && !accept(x, y)) continue
-      const q = toIso(x, y)
-      const hgt = 2.5 + hash2(gx, gy, 4) * 3
-      const lean = (hash2(gx, gy, 5) - 0.5) * 3
-      const p = paths[Math.floor(hash2(gx, gy, 6) * shades.length)]
-      for (const o of [-1.2, 0, 1.2]) {
-        p.moveTo(q.x + o, q.y)
-        p.lineTo(q.x + o * 1.8 + lean, q.y - hgt + Math.abs(o))
+  for (let i = 0; i < GRASS_NX; i++) {
+    for (let j = 0; j < GRASS_NY; j++) {
+      if (hash2(i, j, 1) > GRASS_DENSITY) continue
+      const x = (i + hash2(i, j, 2)) * cw, y = (j + hash2(i, j, 3)) * ch
+      const hgt = 2.5 + hash2(i, j, 4) * 3
+      const lean = (hash2(i, j, 5) - 0.5) * 3
+      const p = paths[Math.floor(hash2(i, j, 6) * shades.length)]
+      // Blades near an edge are repeated on the far side so the tile wraps seamlessly.
+      for (const ox of [-GRASS_W, 0, GRASS_W]) {
+        if (x + ox < -7 || x + ox > GRASS_W + 7) continue
+        for (const oy of [-GRASS_H, 0, GRASS_H]) {
+          if (y + oy < -7 || y + oy > GRASS_H + 7) continue
+          for (const o of [-1.2, 0, 1.2]) {
+            p.moveTo(x + ox + o, y + oy)
+            p.lineTo(x + ox + o * 1.8 + lean, y + oy - hgt + Math.abs(o))
+          }
+        }
       }
     }
   }
-  ctx.save()
-  ctx.lineWidth = 0.8
-  ctx.lineCap = 'round'
-  shades.forEach((c, i) => { ctx.strokeStyle = c; ctx.stroke(paths[i]) })
-  ctx.restore()
+  c.lineWidth = 0.8
+  c.lineCap = 'round'
+  shades.forEach((color, i) => { c.strokeStyle = color; c.stroke(paths[i]) })
+  grassTiles.set(scale, canvas)
+  return canvas
 }
+
+// Build the other quality levels one per timer tick, so zooming across a boundary never has to build a tile mid-frame.
+function warmGrassTiles() {
+  if (grassWarmup) return
+  grassWarmup = true
+  const next = () => {
+    const missing = GRASS_SCALES.find((sc) => !grassTiles.has(sc))
+    if (missing === undefined) return
+    buildGrassTile(missing)
+    setTimeout(next, 50)
+  }
+  setTimeout(next, 200)
+}
+
+function texturedGrass(ctx: Ctx, x0: number, y0: number, x1: number, y1: number, scale: number) {
+  const tile = grassTiles.get(scale) ?? buildGrassTile(scale)
+  warmGrassTiles()
+  for (let ty = Math.floor(y0 / GRASS_H); ty * GRASS_H < y1; ty++)
+    for (let tx = Math.floor(x0 / GRASS_W); tx * GRASS_W < x1; tx++)
+    {
+      // Draw only the part of the tile that is visible.
+      const ax = Math.max(x0, tx * GRASS_W), ay = Math.max(y0, ty * GRASS_H)
+      const bx = Math.min(x1, (tx + 1) * GRASS_W), by = Math.min(y1, (ty + 1) * GRASS_H)
+      if (bx > ax && by > ay) ctx.drawImage(tile, (ax - tx * GRASS_W) * scale, (ay - ty * GRASS_H) * scale, (bx - ax) * scale, (by - ay) * scale, ax, ay, bx - ax, by - ay)
+    }
+}
+
+const groundCache: { key: string; last: string; canvas?: HTMLCanvasElement } = { key: '', last: '' }
 
 export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   ctx.setTransform(1, 0, 0, 1, 0, 0)
@@ -813,11 +855,33 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys)
   {
     const m = ((maxX - minX) + (maxY - minY)) / 4
-    diamond(ctx, minX - m, minY - m, maxX - minX + 2 * m, maxY - minY + 2 * m, 0, '#7fb069')
-    // Stride is based on the view's true area, which doesn't change with rotation
-    // (the bounding box does), so blades don't pop in and out while rotating.
-    const area = Math.abs(view.reduce((a, p, i) => { const q = view[(i + 1) % 4]; return a + p[0] * q[1] - q[0] * p[1] }, 0)) / 2
-    grassBlades(ctx, minX, minY, maxX, maxY, undefined, false, area)
+    const paintGround = (c: Ctx) => {
+      diamond(c, minX - m, minY - m, maxX - minX + 2 * m, maxY - minY + 2 * m, 0, '#7fb069')
+      const need = s.cam.zoom * (ctx.canvas.width / w)
+      const scale = Math.min(2, Math.max(0.5, 2 ** Math.round(Math.log2(need))))
+      texturedGrass(c, vx0 - 12, vy0 - 12, vx1 + 12, vy1 + 12, scale)
+    }
+    // The ground is the costliest part of a frame and only changes with the camera.
+    // Once the camera has held still for a frame, paint it once into a bitmap and
+    // reuse that until the camera or canvas size changes.
+    const key = [ctx.canvas.width, ctx.canvas.height, w, h, s.cam.x, s.cam.y, s.cam.zoom, s.cam.angle].join('|')
+    const gc = groundCache
+    if (gc.key !== key && gc.last === key) {
+      const oc = gc.canvas ??= document.createElement('canvas')
+      oc.width = ctx.canvas.width; oc.height = ctx.canvas.height
+      const o = oc.getContext('2d')!
+      o.translate(w / 2 + s.cam.x, h / 2 + s.cam.y)
+      o.scale(s.cam.zoom, s.cam.zoom)
+      paintGround(o)
+      gc.key = key
+    }
+    if (gc.key === key && gc.canvas) {
+      ctx.save()
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.drawImage(gc.canvas, 0, 0)
+      ctx.restore()
+    } else paintGround(ctx)
+    gc.last = key
   }
 
   // Faint grid while placing, so the edges are visible.
