@@ -3,8 +3,8 @@ import { type Project, timeSaved } from './services/storageService'
 export const TILE_W = 64
 export const TILE_H = 32
 // Floors follow MAX_FLOORS * (min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS)^FLOOR_CURVE_POWER.
-// 5h saved ≈ 6 floors, 50h = 20, 200h ≈ 46, 500h ≈ 69; 1000h and above = MAX_FLOORS.
-const MAX_FLOORS = 100
+// 1000h and above = MAX_FLOORS; each footprint size then clamps to its own range.
+const MAX_FLOORS = 50
 const MAX_FLOOR_HOURS = 1000
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
 const FLOOR_CURVE_POWER = 0.537 // <1 gives a steep start that flattens out
@@ -33,12 +33,10 @@ export const toGrid = (x: number, y: number) => ({
 })
 
 export const footprint = (p: Project) =>
-  p.time_estimated_no_ai < 40 ? 1 : p.time_estimated_no_ai <= 160 ? 2 : p.time_estimated_no_ai <= 400 ? 3 : p.time_estimated_no_ai < 1000 ? 4 : 5
+  p.time_estimated_no_ai <= 8 ? 1 : p.time_estimated_no_ai <= 40 ? 2 : p.time_estimated_no_ai <= 160 ? 3 : p.time_estimated_no_ai < 1000 ? 4 : 5
 
-// Floor limits per footprint size; a building that outgrows its size is rendered as the next one up,
-// which starts at MIN_FLOORS_LARGER so the jump in size never makes it look shorter.
-const MAX_FLOORS_BY_SIZE: Record<number, number> = { 1: 5, 2: 10, 3: 20, 4: 40, 5: MAX_FLOORS }
-const MIN_FLOORS_LARGER = 5
+// Floor range per footprint size; a larger building starts taller so the jump in size never makes it look shorter.
+const FLOOR_RANGE_BY_SIZE: Record<number, [number, number]> = { 1: [1, 3], 2: [1, 10], 3: [5, 15], 4: [5, 30], 5: [10, 50] }
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -454,8 +452,8 @@ export const finalHeight = (p: Project) => {
   const hours = Math.max(0, timeSaved(p))
   const floors = MAX_FLOORS * Math.pow(Math.min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS, FLOOR_CURVE_POWER)
   const size = footprint(p)
-  const clamped = Math.min(floors, MAX_FLOORS_BY_SIZE[size] ?? MAX_FLOORS)
-  return Math.max(size > 1 ? MIN_FLOORS_LARGER : 1, clamped) * FLOOR_HEIGHT
+  const [min, max] = FLOOR_RANGE_BY_SIZE[size] ?? [1, MAX_FLOORS]
+  return Math.min(max, Math.max(min, floors)) * FLOOR_HEIGHT
 }
 
 /** Project-name sign standing on the roof edge above the front-door wall A-B. It lies in the wall's plane, so it foreshortens
