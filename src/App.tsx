@@ -13,8 +13,10 @@ type Tool = 'none' | 'road' | 'delete'
 const HOME: Camera = { x: 0, y: 0, zoom: 1, angle: 0 }
 
 // Toggle from the console: `smoothRotation = true`
-declare global { interface Window { smoothRotation?: boolean } }
+// Toggle from the console: `showPerfTracking = true`
+declare global { interface Window { smoothRotation?: boolean; showPerfTracking?: boolean } }
 window.smoothRotation ??= false
+window.showPerfTracking ??= false
 const smoothRotation = () => !!window.smoothRotation
 
 interface Placing {
@@ -140,6 +142,7 @@ export default function App() {
       })
       const st = statsAcc
       const renderMs = performance.now() - renderStart
+      if (statsRef.current) statsRef.current.hidden = !window.showPerfTracking
       if (st.last) st.worst = Math.max(st.worst, now - st.last)
       st.last = now
       st.frames++
@@ -517,7 +520,7 @@ export default function App() {
           }}
           onContextMenu={(e) => { e.preventDefault(); if (placing) rotateDoor() }}
         />
-        <pre ref={statsRef} className="pointer-events-none absolute left-3 top-3 rounded bg-slate-900/80 px-2 py-1 font-mono text-xs leading-snug text-emerald-300" />
+        <pre ref={statsRef} hidden={!window.showPerfTracking} className="pointer-events-none absolute left-3 top-3 rounded bg-slate-900/80 px-2 py-1 font-mono text-xs leading-snug text-emerald-300" />
         <div className="absolute right-3 top-3 flex flex-col gap-1">
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1.2)} aria-label="Zoom in">+</button>
           <button className="h-8 w-8 rounded bg-slate-800/90 text-lg" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out">−</button>
