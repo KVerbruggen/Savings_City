@@ -33,7 +33,12 @@ export const toGrid = (x: number, y: number) => ({
 })
 
 export const footprint = (p: Project) =>
-  p.time_estimated_no_ai < 40 ? 1 : p.time_estimated_no_ai <= 160 ? 2 : 3
+  p.time_estimated_no_ai < 40 ? 1 : p.time_estimated_no_ai <= 160 ? 2 : p.time_estimated_no_ai <= 400 ? 3 : p.time_estimated_no_ai < 1000 ? 4 : 5
+
+// Floor limits per footprint size; a building that outgrows its size is rendered as the next one up,
+// which starts at MIN_FLOORS_LARGER so the jump in size never makes it look shorter.
+const MAX_FLOORS_BY_SIZE: Record<number, number> = { 1: 5, 2: 10, 3: 20, 4: 40, 5: MAX_FLOORS }
+const MIN_FLOORS_LARGER = 5
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -448,7 +453,9 @@ function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing
 export const finalHeight = (p: Project) => {
   const hours = Math.max(0, timeSaved(p))
   const floors = MAX_FLOORS * Math.pow(Math.min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS, FLOOR_CURVE_POWER)
-  return Math.max(10, floors * FLOOR_HEIGHT)
+  const size = footprint(p)
+  const clamped = Math.min(floors, MAX_FLOORS_BY_SIZE[size] ?? MAX_FLOORS)
+  return Math.max(size > 1 ? MIN_FLOORS_LARGER : 1, clamped) * FLOOR_HEIGHT
 }
 
 /** Project-name sign standing on the roof edge above the front-door wall A-B. It lies in the wall's plane, so it foreshortens
@@ -527,7 +534,7 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
       poly(ctx, [[pts[i].x, pts[i].y - h], [pts[j].x, pts[j].y - h], [apex.x, apexY]], shade(roofColor, f))
     tri((near + 3) % 4, near, 0.9)
     tri(near, (near + 1) % 4, 1.05)
-  } else if (size === 3) {
+  } else if (size >= 3) {
     // roof block in the back-right corner as seen from outside the door
     const n = NORMALS[b.facing]
     const back: V2 = [-n[0], -n[1]], right: V2 = [n[1], -n[0]]
