@@ -27,7 +27,7 @@ export const toGrid = (x: number, y: number) => ({
 })
 
 /** Building footprint in grid cells. L-shapes are the w x d bounding box minus the corner region x >= notch.x, y >= notch.y. */
-export interface Footprint { name: string; w: number; d: number; notch?: V2; maxFloors: number }
+export interface Footprint { name: string; w: number; d: number; notch?: V2; maxFloors: number; rot?: number; base?: Footprint }
 
 // Max floors by the narrowest part of the footprint: 1 wide = 3 floors, 5 wide = 50 floors.
 const MAX_FLOORS_BY_WIDTH: Record<number, number> = { 1: 3, 2: 10, 3: 15, 4: 30, 5: 50 }
@@ -59,11 +59,30 @@ export const floorsOf = (p: Project) => {
   return 1 + Math.round(saved * (footprint(p).maxFloors - 1))
 }
 
+const orientCache = new WeakMap<Footprint, Footprint[]>()
+/** L-shapes turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. Rectangles are unchanged. */
+export const orient = (fp: Footprint, facing: Facing): Footprint => {
+  const base = fp.base ?? fp
+  if (!base.notch) return base
+  let list = orientCache.get(base)
+  if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({ ...base, rot: r, base })))
+  return list[(facing + 2) % 4]
+}
+
+const turnPoint = (fp: Footprint, [x, y]: V2): V2 => {
+  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [fp.w - y, x]
+  return [x, y]
+}
+
 /** Rectangles (x, y, w, d in the local frame) covering the footprint, inset by m on every outer side. Two parts abut along a shared plane. */
 export const footprintRects = (fp: Footprint, m = 0): [number, number, number, number][] => {
   if (!fp.notch) return [[m, m, fp.w - 2 * m, fp.d - 2 * m]]
   const [b, a] = fp.notch
-  return [[m, m, fp.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, fp.d - a]]
+  const rects: [number, number, number, number][] = [[m, m, fp.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, fp.d - a]]
+  return rects.map(([x, y, w, d]) => {
+    const p = turnPoint(fp, [x, y]), q = turnPoint(fp, [x + w, y + d])
+    return [Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.abs(q[0] - p[0]), Math.abs(q[1] - p[1])]
+  })
 }
 
 /** Outline of the footprint inset by m, clockwise in map space. */
@@ -71,11 +90,15 @@ export const footprintOutline = (fp: Footprint, m = 0): V2[] => {
   const { w, d } = fp
   if (!fp.notch) return [[m, m], [w - m, m], [w - m, d - m], [m, d - m]]
   const [b, a] = fp.notch
-  return [[m, m], [w - m, m], [w - m, a - m], [b - m, a - m], [b - m, d - m], [m, d - m]]
+  const pts: V2[] = [[m, m], [w - m, m], [w - m, a - m], [b - m, a - m], [b - m, d - m], [m, d - m]]
+  return pts.map((q) => turnPoint(fp, q))
 }
 
-const hasCell = (fp: Footprint, x: number, y: number) =>
-  x >= 0 && y >= 0 && x < fp.w && y < fp.d && !(fp.notch && x >= fp.notch[0] && y >= fp.notch[1])
+export const hasCell = (fp: Footprint, x: number, y: number) => {
+  if (x < 0 || y < 0 || x >= fp.w || y >= fp.d) return false
+  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [y, fp.w - 1 - x]
+  return !(fp.notch && x >= fp.notch[0] && y >= fp.notch[1])
+}
 
 /** Occupied cells (local frame). */
 const cellsOf = (fp: Footprint): V2[] => {
@@ -124,7 +147,7 @@ export function layout(projects: Project[], constructionStarts = new Map<string,
     // A project without a position is mid-placement and is not rendered yet.
     if (typeof p.gx !== 'number' || typeof p.gy !== 'number') continue
     out.push({
-      p, fp: footprint(p), gx: p.gx, gy: p.gy,
+      p, fp: orient(footprint(p), (p.facing ?? 2) as Facing), gx: p.gx, gy: p.gy,
       facing: (p.facing ?? 2) as Facing,
       // Projects loaded together start together. A newly submitted project can
       // provide its own elapsed start time without shifting older buildings.
@@ -147,6 +170,7 @@ export function parseEdge(key: string): [V2, V2] {
 
 /** Edges along the front side of a building: the cells touching the bounding box side the door faces. */
 export function frontEdges(gx: number, gy: number, fp: Footprint, facing: Facing): string[] {
+  fp = orient(fp, facing)
   const out: string[] = []
   for (const [x, y] of cellsOf(fp)) {
     if (facing === 0 && y === 0) out.push(edgeKey(gx + x, gy, 'h'))
@@ -181,6 +205,7 @@ const occupied = (placed: Placed[], ignoreId?: string) => {
 }
 
 export function placementError(gx: number, gy: number, fp: Footprint, facing: Facing, placed: Placed[], roads: Set<string>, ignoreId?: string): string | undefined {
+  fp = orient(fp, facing)
   const tiles = occupied(placed, ignoreId)
   for (const [x, y] of cellsOf(fp))
     if (tiles.has(`${gx + x},${gy + y}`)) return 'Overlaps another building'
@@ -1227,7 +1252,8 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       }
     }
   } else if (pv?.kind === 'building') {
-    const { gx, gy, fp, height, facing, ok } = pv
+    const { gx, gy, height, facing, ok } = pv
+    const fp = orient(pv.fp, facing)
     poly(ctx, footprintOutline(fp).map(([x, y]) => { const q = toIso(gx + x, gy + y); return [q.x, q.y] as [number, number] }), ok ? 'rgba(74,222,128,0.35)' : 'rgba(248,113,113,0.35)', ok ? '#4ade80' : '#f87171')
     const at = frameOf({ gx, gy })
     const m = BUILDING_MARGIN
@@ -1268,7 +1294,7 @@ export function pick(placed: Placed[], elapsed: number, sx: number, sy: number, 
       const rotated = toGrid(screenX, screenY + z)
       const gx = rotated.gx * cos + rotated.gy * sin
       const gy = -rotated.gx * sin + rotated.gy * cos
-      if (gx >= b.gx && gx <= b.gx + b.fp.w && gy >= b.gy && gy <= b.gy + b.fp.d && !(b.fp.notch && gx > b.gx + b.fp.notch[0] && gy > b.gy + b.fp.notch[1])) return b
+      if (hasCell(b.fp, Math.floor(gx - b.gx), Math.floor(gy - b.gy))) return b
     }
   }
   return undefined
