@@ -135,6 +135,8 @@ export function placementError(gx: number, gy: number, size: number, facing: Fac
   const tiles = occupied(placed, ignoreId)
   for (let x = 0; x < size; x++) for (let y = 0; y < size; y++)
     if (tiles.has(`${gx + x},${gy + y}`)) return 'Overlaps another building'
+  for (let i = 0; i < size; i++) for (let j = 1; j < size; j++)
+    if (roads.has(edgeKey(gx + i, gy + j, 'h')) || roads.has(edgeKey(gx + j, gy + i, 'v'))) return 'Overlaps an existing road'
   if (roads.size > 0) {
     const verts = roadVertices(roads)
     if (!frontVertices(gx, gy, size, facing).some((v) => verts.has(v))) return 'The front must touch an existing road'
@@ -185,10 +187,18 @@ function buildingReach(placed: Placed[]) {
   return out
 }
 
+/** True when both sides of the edge lie within the building's footprint. */
+function edgeInsideBuilding(key: string, b: Placed): boolean {
+  const [x, y, d] = key.split(',')
+  const px = Number(x) - b.gx, py = Number(y) - b.gy
+  return d === 'h' ? px >= 0 && px < b.size && py > 0 && py < b.size : py >= 0 && py < b.size && px > 0 && px < b.size
+}
+
 export function roadError(key: string, placed: Placed[], roads: Set<string>, verts?: Set<string>): string | undefined {
   if (roads.has(key)) return 'Already a road'
   const [a0, b0] = parseEdge(key)
   const edge: [number, number, number, number] = [a0[0], a0[1], b0[0], b0[1]]
+  if (placed.some((b) => edgeInsideBuilding(key, b))) return 'A road cannot cross a building'
   if (!buildingReach(placed).some((b) => gapBetween(edge, b.rect) <= b.reach)) return 'A road must be near a building'
   if (roads.size > 0) {
     verts ??= roadVertices(roads)
