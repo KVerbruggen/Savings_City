@@ -343,8 +343,8 @@ export default function App() {
       const withFront = new Set(await roadService.add(frontEdges(gx, gy, placing.size, placing.facing)))
       const list = await dataService.list()
       setRoads(placing.origin ? await pruneRoads(list, withFront) : withFront)
-      // Construction only starts once the building is placed (moves keep their progress).
-      if (!placing.origin) {
+      // Construction only starts on the first placement; moves and resize re-placements keep their progress.
+      if (!constructionStartsRef.current.has(placing.id)) {
         constructionStartsRef.current.set(placing.id, performance.now() - startRef.current)
         setStartsVersion((v) => v + 1)
       }
