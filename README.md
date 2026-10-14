@@ -8,13 +8,13 @@ determined by the project's original inputs.
 
 ### Buildings
 
-- **Building footprint / size** represents the estimated effort without AI:
-  - Less than 40 estimated hours: small, 1×1 footprint
-  - 40–160 estimated hours: medium, 2×2 footprint
-  - More than 160 estimated hours: large, 3×3 footprint
-- **Building height** represents time saved through AI. It is calculated as
-  `estimated hours without AI - hours spent with AI`; more saved time produces a
-  taller building.
+- **Building footprint** (number of grid cells) depends only on the estimated
+  effort without AI. Footprints, smallest to largest: 1×1, 1×2, 1×2+1×1
+  (L-shape), 2×2, 2×3, 2×4, 3×3, 2×5, 2×4+2×2 (L-shape), 3×4, 3×5, 4×4, 4×5, 5×5.
+- **Building height** (number of floors) depends on the percentage of time
+  saved, `(estimated hours without AI - hours spent with AI) / estimated hours`.
+  Every footprint has at least 1 floor; the maximum depends on its narrowest
+  width: 1 = 3 floors, 2 = 10, 3 = 15, 4 = 30, 5 = 50.
 - **Construction animation** represents the project being built. Projects that
   are loaded together start together, but each building takes a different
   amount of time to finish based on its estimated effort. A newly submitted
@@ -24,8 +24,8 @@ determined by the project's original inputs.
 - **Helipad and neon detail** indicate a project with more than $5,000 in
   budget used. The budget also controls the brighter window lighting on these
   buildings.
-- **Roof block:** big buildings have a crystal roof block in the back-right
-  corner (as seen from the door). Medium buildings have a flat roof.
+- **Roof block:** buildings at least 3×3 have a crystal roof block in the back-right
+  corner (as seen from the door).
 
 ### Streets and vehicles
 

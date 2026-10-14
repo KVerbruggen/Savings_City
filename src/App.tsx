@@ -3,7 +3,7 @@ import {
   type Project, dataService, roadService, timeSaved, timeSavingsRatio,
 } from './services/storageService'
 import {
-  type Camera, type Facing, type Placed, type Preview, type Traffic,
+  type Camera, type Facing, type Footprint, type Placed, type Preview, type Traffic,
   centerOn, formatRemaining, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
   placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
 } from './engine'
@@ -22,7 +22,7 @@ const smoothRotation = () => !!window.smoothRotation
 interface Placing {
   id: string
   name: string
-  size: number
+  fp: Footprint
   height: number
   facing: Facing
   origin?: { gx: number; gy: number; facing: Facing }
@@ -123,9 +123,9 @@ export default function App() {
       if (cur.placing || cur.tool !== 'none') {
         const map = screenToMap(cursorRef.current.x, cursorRef.current.y, w, h, camRef.current)
         if (cur.placing) {
-          const { size, height, facing } = cur.placing
-          const { gx, gy } = placementAt(map, size)
-          preview = { kind: 'building', gx, gy, size, height, facing, ok: !placementError(gx, gy, size, facing, cur.placed, cur.roads) }
+          const { fp, height, facing } = cur.placing
+          const { gx, gy } = placementAt(map, fp)
+          preview = { kind: 'building', gx, gy, fp, height, facing, ok: !placementError(gx, gy, fp, facing, cur.placed, cur.roads) }
         } else {
           const run = runRef.current
           preview = {
@@ -162,7 +162,7 @@ export default function App() {
         const b = cur.placed.find((q) => q.p.id === tipIdRef.current)
         if (b) {
           const cam = camRef.current
-          const c = toIso(b.gx + b.size / 2, b.gy + b.size / 2, cam.angle)
+          const c = toIso(b.gx + b.fp.w / 2, b.gy + b.fp.d / 2, cam.angle)
           const hgt = finalHeight(b.p) * Math.max(0, Math.min(1, progressOf(b, now - startRef.current)))
           tipEl.style.left = `${w / 2 + cam.x + c.x * cam.zoom}px`
           tipEl.style.top = `${h / 2 + cam.y + (c.y - hgt / 2) * cam.zoom}px`
@@ -336,11 +336,11 @@ export default function App() {
     const sx = e.clientX - r.left, sy = e.clientY - r.top
     if (placing) {
       const map = screenToMap(sx, sy, r.width, r.height, camRef.current)
-      const { gx, gy } = placementAt(map, placing.size)
-      const error = placementError(gx, gy, placing.size, placing.facing, placed, roads)
+      const { gx, gy } = placementAt(map, placing.fp)
+      const error = placementError(gx, gy, placing.fp, placing.facing, placed, roads)
       if (error) { setPlaceError(error); return }
       await dataService.update(placing.id, { gx, gy, facing: placing.facing })
-      const withFront = new Set(await roadService.add(frontEdges(gx, gy, placing.size, placing.facing)))
+      const withFront = new Set(await roadService.add(frontEdges(gx, gy, placing.fp, placing.facing)))
       const list = await dataService.list()
       setRoads(placing.origin ? await pruneRoads(list, withFront) : withFront)
       // Construction only starts on the first placement; moves and resize re-placements keep their progress.
@@ -375,8 +375,8 @@ export default function App() {
       let anchored: { gx: number; gy: number } | undefined
       if (resized && updated && old) {
         // Scale around the door: the front edge stays put and the door stays centred on the same spot.
-        const f = (old.facing ?? 2) as Facing, d = footprint(old) - footprint(updated), ox = old.gx as number, oy = old.gy as number
-        const sx = f === 1 ? d : f === 3 ? 0 : d / 2, sy = f === 2 ? d : f === 0 ? 0 : d / 2
+        const f = (old.facing ?? 2) as Facing, fo = footprint(old), fu = footprint(updated), dw = fo.w - fu.w, dd = fo.d - fu.d, ox = old.gx as number, oy = old.gy as number
+        const sx = f === 1 ? dw : f === 3 ? 0 : dw / 2, sy = f === 2 ? dd : f === 0 ? 0 : dd / 2
         const others = stateRef.current.placed
         const xs = [...new Set([Math.floor(ox + sx), Math.ceil(ox + sx)])], ys = [...new Set([Math.floor(oy + sy), Math.ceil(oy + sy)])]
         for (const x of xs) for (const y of ys)
@@ -389,7 +389,7 @@ export default function App() {
         // No valid position around the door: clear the position and make the user re-place it.
         await dataService.update(editingId, { ...values, gx: null, gy: null })
         setProjects(await dataService.list())
-        setPlacing({ id: updated.id, name: updated.name, size: footprint(updated), height: finalHeight(updated), facing: updated.facing ?? 2 })
+        setPlacing({ id: updated.id, name: updated.name, fp: footprint(updated), height: finalHeight(updated), facing: updated.facing ?? 2 })
         setPlaceError('The building changed size. Place it again.')
       } else {
         await dataService.update(editingId, values)
@@ -400,7 +400,7 @@ export default function App() {
       // invisible until the user has placed it on the map.
       const created = await dataService.create({ ...values, gx: null, gy: null, facing: 2 })
       setProjects(await dataService.list())
-      setPlacing({ id: created.id, name: created.name, size: footprint(created), height: finalHeight(created), facing: 2 })
+      setPlacing({ id: created.id, name: created.name, fp: footprint(created), height: finalHeight(created), facing: 2 })
       setTool('none')
       setRoadMenu(false)
       setPlaceError(undefined)
@@ -425,7 +425,7 @@ export default function App() {
     setTip(undefined)
     await dataService.update(p.id, { gx: null, gy: null })
     setProjects(await dataService.list())
-    setPlacing({ id: p.id, name: p.name, size: footprint(p), height: finalHeight(p), facing: origin.facing, origin })
+    setPlacing({ id: p.id, name: p.name, fp: footprint(p), height: finalHeight(p), facing: origin.facing, origin })
     setTool('none')
     setRoadMenu(false)
     setTip(undefined)

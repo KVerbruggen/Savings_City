@@ -3,8 +3,6 @@ import { type Project } from './services/storageService'
 export const TILE_W = 64
 export const TILE_H = 32
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
-const FLOOR_CURVE_POWER = 0.579 // <1 gives a steep start that flattens out; puts ~33h at the 2x2 -> 3x3 switch
-const FLOOR_HEIGHT = 10 // px per floor
 let projectionAngle = 0
 
 export type V2 = [number, number]
@@ -28,21 +26,63 @@ export const toGrid = (x: number, y: number) => ({
   gy: y / TILE_H - x / TILE_W,
 })
 
-// One curve decides both footprint and floors. Each size covers a floor range [min, max]; the ranges are laid end to end,
-// so passing a size's max floors overflows into the next size's min floors. Estimated hours without AI, the same input the footprint always used (capped at MAX_CURVE_HOURS),
-// are mapped through the curve onto that sequence of (size, floors) steps.
-const SIZE_FLOORS: [number, number][] = [[1, 3], [1, 10], [5, 15], [5, 30], [10, 50]] // index + 1 = footprint size
-const MAX_CURVE_HOURS = 1000
-const STEPS = SIZE_FLOORS.flatMap(([min, max], i) =>
-  Array.from({ length: max - min + 1 }, (_, k): [number, number] => [i + 1, min + k]))
+/** Building footprint in grid cells. L-shapes are the w x d bounding box minus the corner region x >= notch.x, y >= notch.y. */
+export interface Footprint { name: string; w: number; d: number; notch?: V2; maxFloors: number }
 
-const stepOf = (p: Project) => {
+// Max floors by the narrowest part of the footprint: 1 wide = 3 floors, 5 wide = 50 floors.
+const MAX_FLOORS_BY_WIDTH: Record<number, number> = { 1: 3, 2: 10, 3: 15, 4: 30, 5: 50 }
+const rectFp = (w: number, d: number): Footprint => ({ name: `${w}x${d}`, w, d, maxFloors: MAX_FLOORS_BY_WIDTH[Math.min(w, d)] })
+const lFp = (w: number, d: number, notch: V2, name: string): Footprint =>
+  ({ name, w, d, notch, maxFloors: MAX_FLOORS_BY_WIDTH[Math.min(notch[0], notch[1], w - notch[0], d - notch[1])] })
+
+// Ordered by number of grid cells.
+export const FOOTPRINTS: Footprint[] = [
+  rectFp(1, 1), rectFp(1, 2), lFp(2, 2, [1, 1], '1x2+1x1'), rectFp(2, 2), rectFp(2, 3), rectFp(2, 4), rectFp(3, 3), rectFp(2, 5),
+  lFp(4, 4, [2, 2], '2x4+2x2'), rectFp(3, 4), rectFp(3, 5), rectFp(4, 4), rectFp(4, 5), rectFp(5, 5),
+]
+
+const FOOTPRINT_CURVE_POWER = 0.579 // <1 gives a steep start that flattens out
+const MAX_CURVE_HOURS = 1000
+const FLOOR_HEIGHT = 10 // px per floor
+
+/** Footprint depends only on the estimated hours without AI. */
+export const footprint = (p: Project): Footprint => {
   const hours = Math.min(Math.max(0, p.time_estimated_no_ai), MAX_CURVE_HOURS)
-  const t = Math.pow(hours / MAX_CURVE_HOURS, FLOOR_CURVE_POWER)
-  return STEPS[Math.round(t * (STEPS.length - 1))]
+  const t = Math.pow(hours / MAX_CURVE_HOURS, FOOTPRINT_CURVE_POWER)
+  return FOOTPRINTS[Math.min(FOOTPRINTS.length - 1, Math.floor(t * FOOTPRINTS.length))]
 }
 
-export const footprint = (p: Project) => stepOf(p)[0]
+/** Floors depend on the fraction of time saved: 1 at no savings, the footprint's maximum at full savings. */
+export const floorsOf = (p: Project) => {
+  const est = p.time_estimated_no_ai
+  const saved = est > 0 ? Math.min(1, Math.max(0, (est - Math.max(0, p.time_spent_ai)) / est)) : 0
+  return 1 + Math.round(saved * (footprint(p).maxFloors - 1))
+}
+
+/** Rectangles (x, y, w, d in the local frame) covering the footprint, inset by m on every outer side. Two parts abut along a shared plane. */
+export const footprintRects = (fp: Footprint, m = 0): [number, number, number, number][] => {
+  if (!fp.notch) return [[m, m, fp.w - 2 * m, fp.d - 2 * m]]
+  const [b, a] = fp.notch
+  return [[m, m, fp.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, fp.d - a]]
+}
+
+/** Outline of the footprint inset by m, clockwise in map space. */
+export const footprintOutline = (fp: Footprint, m = 0): V2[] => {
+  const { w, d } = fp
+  if (!fp.notch) return [[m, m], [w - m, m], [w - m, d - m], [m, d - m]]
+  const [b, a] = fp.notch
+  return [[m, m], [w - m, m], [w - m, a - m], [b - m, a - m], [b - m, d - m], [m, d - m]]
+}
+
+const hasCell = (fp: Footprint, x: number, y: number) =>
+  x >= 0 && y >= 0 && x < fp.w && y < fp.d && !(fp.notch && x >= fp.notch[0] && y >= fp.notch[1])
+
+/** Occupied cells (local frame). */
+const cellsOf = (fp: Footprint): V2[] => {
+  const out: V2[] = []
+  for (let x = 0; x < fp.w; x++) for (let y = 0; y < fp.d; y++) if (hasCell(fp, x, y)) out.push([x, y])
+  return out
+}
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -61,7 +101,7 @@ export type Facing = 0 | 1 | 2 | 3
 
 export interface Placed {
   p: Project
-  size: number
+  fp: Footprint
   gx: number
   gy: number
   facing: Facing
@@ -84,7 +124,7 @@ export function layout(projects: Project[], constructionStarts = new Map<string,
     // A project without a position is mid-placement and is not rendered yet.
     if (typeof p.gx !== 'number' || typeof p.gy !== 'number') continue
     out.push({
-      p, size: footprint(p), gx: p.gx, gy: p.gy,
+      p, fp: footprint(p), gx: p.gx, gy: p.gy,
       facing: (p.facing ?? 2) as Facing,
       // Projects loaded together start together. A newly submitted project can
       // provide its own elapsed start time without shifting older buildings.
@@ -105,21 +145,21 @@ export function parseEdge(key: string): [V2, V2] {
   return d === 'h' ? [[px, py], [px + 1, py]] : [[px, py], [px, py + 1]]
 }
 
-/** Lattice points along the front side of a building (size + 1 of them). */
-const frontVertices = (gx: number, gy: number, size: number, facing: Facing): string[] =>
-  Array.from({ length: size + 1 }, (_, i) =>
-    facing === 0 ? `${gx + i},${gy}`
-      : facing === 1 ? `${gx + size},${gy + i}`
-        : facing === 2 ? `${gx + i},${gy + size}`
-          : `${gx},${gy + i}`)
-
-export function frontEdges(gx: number, gy: number, size: number, facing: Facing): string[] {
-  return Array.from({ length: size }, (_, i) =>
-    facing === 0 ? edgeKey(gx + i, gy, 'h')
-      : facing === 1 ? edgeKey(gx + size, gy + i, 'v')
-        : facing === 2 ? edgeKey(gx + i, gy + size, 'h')
-          : edgeKey(gx, gy + i, 'v'))
+/** Edges along the front side of a building: the cells touching the bounding box side the door faces. */
+export function frontEdges(gx: number, gy: number, fp: Footprint, facing: Facing): string[] {
+  const out: string[] = []
+  for (const [x, y] of cellsOf(fp)) {
+    if (facing === 0 && y === 0) out.push(edgeKey(gx + x, gy, 'h'))
+    else if (facing === 1 && x === fp.w - 1) out.push(edgeKey(gx + fp.w, gy + y, 'v'))
+    else if (facing === 2 && y === fp.d - 1) out.push(edgeKey(gx + x, gy + fp.d, 'h'))
+    else if (facing === 3 && x === 0) out.push(edgeKey(gx, gy + y, 'v'))
+  }
+  return out
 }
+
+/** Lattice points along the front side of a building. */
+const frontVertices = (gx: number, gy: number, fp: Footprint, facing: Facing): string[] =>
+  frontEdges(gx, gy, fp, facing).flatMap((k) => parseEdge(k).map((v) => `${v[0]},${v[1]}`))
 
 export function roadVertices(roads: Iterable<string>): Set<string> {
   const out = new Set<string>()
@@ -135,31 +175,33 @@ const occupied = (placed: Placed[], ignoreId?: string) => {
   const tiles = new Set<string>()
   for (const b of placed) {
     if (b.p.id === ignoreId) continue
-    for (let x = 0; x < b.size; x++) for (let y = 0; y < b.size; y++) tiles.add(`${b.gx + x},${b.gy + y}`)
+    for (const [x, y] of cellsOf(b.fp)) tiles.add(`${b.gx + x},${b.gy + y}`)
   }
   return tiles
 }
 
-export function placementError(gx: number, gy: number, size: number, facing: Facing, placed: Placed[], roads: Set<string>, ignoreId?: string): string | undefined {
+export function placementError(gx: number, gy: number, fp: Footprint, facing: Facing, placed: Placed[], roads: Set<string>, ignoreId?: string): string | undefined {
   const tiles = occupied(placed, ignoreId)
-  for (let x = 0; x < size; x++) for (let y = 0; y < size; y++)
+  for (const [x, y] of cellsOf(fp))
     if (tiles.has(`${gx + x},${gy + y}`)) return 'Overlaps another building'
-  for (let i = 0; i < size; i++) for (let j = 1; j < size; j++)
-    if (roads.has(edgeKey(gx + i, gy + j, 'h')) || roads.has(edgeKey(gx + j, gy + i, 'v'))) return 'Overlaps an existing road'
+  for (const [x, y] of cellsOf(fp)) {
+    if (hasCell(fp, x, y - 1) && roads.has(edgeKey(gx + x, gy + y, 'h'))) return 'Overlaps an existing road'
+    if (hasCell(fp, x - 1, y) && roads.has(edgeKey(gx + x, gy + y, 'v'))) return 'Overlaps an existing road'
+  }
   if (roads.size > 0) {
     const verts = roadVertices(roads)
-    if (!frontVertices(gx, gy, size, facing).some((v) => verts.has(v))) return 'The front must touch an existing road'
+    if (!frontVertices(gx, gy, fp, facing).some((v) => verts.has(v))) return 'The front must touch an existing road'
   }
   const others = ignoreId ? placed.filter((b) => b.p.id !== ignoreId) : placed
   if (others.length) {
-    const rect: [number, number, number, number] = [gx, gy, gx + size, gy + size]
+    const rect: [number, number, number, number] = [gx, gy, gx + fp.w, gy + fp.d]
     if (!buildingReach(others).some((b) => gapBetween(rect, b.rect) <= b.reach)) return 'Too far from other buildings'
   }
   return undefined
 }
 
-export const placementAt = (map: V2, size: number): { gx: number; gy: number } =>
-  ({ gx: Math.round(map[0] - size / 2), gy: Math.round(map[1] - size / 2) })
+export const placementAt = (map: V2, fp: Footprint): { gx: number; gy: number } =>
+  ({ gx: Math.round(map[0] - fp.w / 2), gy: Math.round(map[1] - fp.d / 2) })
 
 /** Grid edge nearest to a map point. */
 export function nearestEdge(map: V2): string {
@@ -183,7 +225,7 @@ const reachCache = new WeakMap<Placed[], { rect: [number, number, number, number
 function buildingReach(placed: Placed[]) {
   let out = reachCache.get(placed)
   if (out) return out
-  const rects = placed.map((b): [number, number, number, number] => [b.gx, b.gy, b.gx + b.size, b.gy + b.size])
+  const rects = placed.map((b): [number, number, number, number] => [b.gx, b.gy, b.gx + b.fp.w, b.gy + b.fp.d])
   const parent = rects.map((_, i) => i)
   const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])))
   for (let i = 0; i < rects.length; i++)
@@ -200,7 +242,7 @@ function buildingReach(placed: Placed[]) {
 function edgeInsideBuilding(key: string, b: Placed): boolean {
   const [x, y, d] = key.split(',')
   const px = Number(x) - b.gx, py = Number(y) - b.gy
-  return d === 'h' ? px >= 0 && px < b.size && py > 0 && py < b.size : py >= 0 && py < b.size && px > 0 && px < b.size
+  return d === 'h' ? hasCell(b.fp, px, py - 1) && hasCell(b.fp, px, py) : hasCell(b.fp, px - 1, py) && hasCell(b.fp, px, py)
 }
 
 export function roadError(key: string, placed: Placed[], roads: Set<string>, verts?: Set<string>): string | undefined {
@@ -247,7 +289,7 @@ export const roadsToDelete = (run: string[], roads: Set<string>): string[] => ru
 /** Run edges plus any roads left with no connection to a building: every
  * connected piece of road must contain an edge touching a building. */
 export function roadsToDeleteWithOrphans(run: string[], placed: Placed[], roads: Set<string>, force = false): string[] {
-  const fronts = new Set(placed.flatMap((b) => frontEdges(b.gx, b.gy, b.size, b.facing)))
+  const fronts = new Set(placed.flatMap((b) => frontEdges(b.gx, b.gy, b.fp, b.facing)))
   const gone = new Set(roadsToDelete(run, roads).filter((k) => !fronts.has(k)))
   if (!gone.size && !force) return []
   const left = [...roads].filter((k) => !gone.has(k))
@@ -422,13 +464,32 @@ const NORMALS: V2[] = [[0, -1], [1, 0], [0, 1], [-1, 0]]
 
 /** Door on the front wall of the box inset by m from the footprint, drawn
  * only while that wall faces the camera. */
-function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing, m: number, z0 = 0, alpha = 1, win?: string) {
+/** Longest contiguous run of front cells [from, to] along the side the door faces. */
+function frontRun(fp: Footprint, facing: Facing): [number, number] {
+  const horizontal = facing === 0 || facing === 2
+  const len = horizontal ? fp.w : fp.d
+  let best: [number, number] = [0, 0], start = -1
+  for (let i = 0; i <= len; i++) {
+    const front = i < len && (horizontal ? hasCell(fp, i, facing === 0 ? 0 : fp.d - 1) : hasCell(fp, facing === 3 ? 0 : fp.w - 1, i))
+    if (front && start < 0) start = i
+    if (!front && start >= 0) { if (i - start > best[1] - best[0]) best = [start, i]; start = -1 }
+  }
+  return best
+}
+
+/** The front wall of the body inset by m, as a segment in the local frame. */
+function frontWall(fp: Footprint, facing: Facing, m: number): [V2, V2] {
+  const [r0, r1] = frontRun(fp, facing)
+  const a = r0 + m, b = r1 - m
+  return facing === 0 ? [[a, m], [b, m]] : facing === 1 ? [[fp.w - m, a], [fp.w - m, b]]
+    : facing === 2 ? [[a, fp.d - m], [b, fp.d - m]] : [[m, a], [m, b]]
+}
+
+function drawDoor(ctx: Ctx, gx: number, gy: number, fp: Footprint, facing: Facing, m: number, z0 = 0, alpha = 1, win?: string) {
   const n = NORMALS[facing]
   if (toIso(n[0], n[1]).y <= 0.01) return
-  let c: V2 = facing === 0 ? [gx + size / 2, gy + m]
-    : facing === 1 ? [gx + size - m, gy + size / 2]
-      : facing === 2 ? [gx + size / 2, gy + size - m]
-        : [gx + m, gy + size / 2]
+  const [w0, w1] = frontWall(fp, facing, m)
+  let c: V2 = [gx + (w0[0] + w1[0]) / 2, gy + (w0[1] + w1[1]) / 2]
   let t: V2 = n[0] === 0 ? [1, 0] : [0, 1]
   if (win) {
     // Thin door left of centre, window to its right as seen on screen.
@@ -454,7 +515,7 @@ function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing
   ctx.restore()
 }
 
-export const finalHeight = (p: Project) => stepOf(p)[1] * FLOOR_HEIGHT
+export const finalHeight = (p: Project) => floorsOf(p) * FLOOR_HEIGHT
 
 /** Project-name sign standing on the roof edge above the front-door wall A-B. It lies in the wall's plane, so it foreshortens
  * with the map rotation and is skipped when the wall faces away or is seen too edge-on. */
@@ -507,43 +568,52 @@ function drawSign(ctx: Ctx, A: V2, B: V2, outward: V2, z: number, name: string, 
   ctx.restore()
   ctx.restore()
 }
+/** Extruded body of the footprint inset by m; the parts of an L-shape are drawn far one first. */
+function bodyAt(ctx: Ctx, at: Frame, fp: Footprint, m: number, height: number, color: string, opts: Parameters<typeof boxAt>[8] = {}) {
+  const rects = footprintRects(fp, m)
+  if (rects.length > 1 && toIso(0, 1).y <= 0) rects.reverse()
+  for (const [x, y, w, d] of rects) boxAt(ctx, at, x, y, w, d, height, color, opts)
+}
+
 function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
-  const { p, size } = b
+  const { p, fp } = b
   const at = frameOf(b)
   const rich = p.budget_spent > 5000, mid = p.budget_spent > 1500
   const color = randomColor(p.id)
   const win = rich ? '#ffe36b' : '#d8f4ff'
   const m = BUILDING_MARGIN
-  const inner = size - 2 * m
-  const wall: [V2, V2][] = [[at(m, m), at(size - m, m)], [at(size - m, m), at(size - m, size - m)], [at(m, size - m), at(size - m, size - m)], [at(m, m), at(m, size - m)]]
-  boxAt(ctx, at, m, m, inner, inner, h, color, { windows: win, windowScale: size === 1 ? 0.75 : 1, noWindowsOn: size === 1 ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
-  drawDoor(ctx, b.gx, b.gy, size, b.facing, m, 0, 1, size === 1 ? win : undefined)
-  if (size > 1) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
+  const single = fp.w === 1 && fp.d === 1
+  const innerW = fp.w - 2 * m, innerD = fp.d - 2 * m
+  const wall: [V2, V2][] = [0, 1, 2, 3].map((f) => frontWall(fp, f as Facing, m).map((q) => at(q[0], q[1])) as [V2, V2])
+  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: single ? 0.75 : 1, noWindowsOn: single ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
+  drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 0, 1, single ? win : undefined)
+  if (!single) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
   // Put bands on the facade before the roof so they cannot paint over its lower half.
-  if (mid || rich) boxAt(ctx, at, m - 0.03, m - 0.03, inner + 0.06, inner + 0.06, 3, '#e6b422', { z0: Math.max(0, h - 3) })
-  const roofH = size === 1 ? 8 : size === 2 ? 0 : 14
-  if (size === 1) {
+  if (mid || rich) bodyAt(ctx, at, fp, m - 0.03, 3, '#e6b422', { z0: Math.max(0, h - 3) })
+  const block = !fp.notch && Math.min(fp.w, fp.d) >= 3
+  const roofH = single ? 8 : block ? 14 : 0
+  if (single) {
     const roofColor = '#9fe3ff'
-    const pts = [at(m, m), at(size - m, m), at(size - m, size - m), at(m, size - m)].map((q) => toIso(q[0], q[1]))
+    const pts = [at(m, m), at(1 - m, m), at(1 - m, 1 - m), at(m, 1 - m)].map((q) => toIso(q[0], q[1]))
     const near = pts.reduce((best, q, i) => q.y > pts[best].y ? i : best, 0)
-    const apex = toIso(...at(size / 2, size / 2))
+    const apex = toIso(...at(0.5, 0.5))
     const apexY = apex.y - h - roofH
     const tri = (i: number, j: number, f: number) =>
       poly(ctx, [[pts[i].x, pts[i].y - h], [pts[j].x, pts[j].y - h], [apex.x, apexY]], shade(roofColor, f))
     tri((near + 3) % 4, near, 0.9)
     tri(near, (near + 1) % 4, 1.05)
-  } else if (size >= 3) {
+  } else if (block) {
     // roof block in the back-right corner as seen from outside the door
     const n = NORMALS[b.facing]
     const back: V2 = [-n[0], -n[1]], right: V2 = [n[1], -n[0]]
-    const w = inner * 0.4, off = inner * 0.3
-    const cx = size / 2 + (back[0] + right[0]) * off
-    const cy = size / 2 + (back[1] + right[1]) * off
+    const w = Math.min(innerW, innerD) * 0.4
+    const cx = fp.w / 2 + (back[0] + right[0]) * innerW * 0.3
+    const cy = fp.d / 2 + (back[1] + right[1]) * innerD * 0.3
     const roofColor = '#9fe3ff'
     boxAt(ctx, at, cx - w / 2, cy - w / 2, w, w, roofH, roofColor, { z0: h })
   }
-  const c = toIso(...at(size / 2, size / 2))
-  const top = size === 1 ? h + roofH : h
+  const c = toIso(...at(fp.w / 2, fp.d / 2))
+  const top = single ? h + roofH : h
   if (rich) {
     // helipad
     ctx.beginPath()
@@ -555,21 +625,21 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
     const pulse = 0.5 + 0.5 * Math.sin(time / 400)
     ctx.save(); ctx.globalAlpha = 0.25 + 0.2 * pulse
     ctx.fillStyle = '#ff3df2'
-    ctx.beginPath(); ctx.ellipse(c.x, c.y, size * 24, size * 12, 0, 0, Math.PI * 2); ctx.fill()
+    ctx.beginPath(); ctx.ellipse(c.x, c.y, (fp.w + fp.d) * 12, (fp.w + fp.d) * 6, 0, 0, Math.PI * 2); ctx.fill()
     ctx.restore()
   }
 }
 
 /** Crane base position relative to the site origin; deliberately not on the diagonal. */
-const craneBase = (size: number): V2 => [-0.42, BUILDING_MARGIN - 0.3 + (size - 2 * BUILDING_MARGIN) * 0.25]
+const craneBase = (fp: Footprint): V2 => [-0.42, BUILDING_MARGIN - 0.3 + (fp.d - 2 * BUILDING_MARGIN) * 0.25]
 
 function craneDepth(b: Placed, angle: number) {
-  const [cx, cy] = craneBase(b.size)
+  const [cx, cy] = craneBase(b.fp)
   return toIso(b.gx + cx, b.gy + cy, angle).y
 }
 
 function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number, part: 'site' | 'crane') {
-  const { size } = b
+  const { fp } = b
   const at = frameOf(b)
   const iso = (a: number, c: number) => toIso(...at(a, c))
   if (part === 'crane') {
@@ -578,30 +648,38 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number, pa
   }
   // slab
   const edge = BUILDING_MARGIN
-  boxAt(ctx, at, edge, edge, size - 2 * edge, size - 2 * edge, 2, '#9a9a9a')
+  bodyAt(ctx, at, fp, edge, 2, '#9a9a9a')
   // dirt piles & barriers
-  const d = iso(edge - 0.1, size - edge + 0.05)
+  const d = iso(edge - 0.1, fp.d - edge + 0.05)
   ctx.fillStyle = '#8b6b3e'; ctx.beginPath(); ctx.ellipse(d.x, d.y - 2, 9, 4.5, 0, Math.PI, 0); ctx.fill()
-  const fence = size - 2 * edge
-  for (let k = 0; k < size * 2; k++) {
-    const t = (k + 0.5) / (size * 2)
-    boxAt(ctx, at, edge + t * fence - 0.08, size - edge, 0.16, 0.1, 5, k % 2 ? '#f4c20d' : '#d94b2b')
+  const outline = (inset: number) => {
+    const pts = footprintOutline(fp, inset)
+    return pts.map((q, i) => [q, pts[(i + 1) % pts.length]] as [V2, V2])
+  }
+  for (const [[x1, y1], [x2]] of outline(edge)) {
+    if (x2 >= x1) continue
+    const span = x1 - x2
+    const n = Math.max(1, Math.round(span * 2))
+    for (let k = 0; k < n; k++) {
+      const t = (k + 0.5) / n
+      boxAt(ctx, at, x2 + t * span - 0.08, y1, 0.16, 0.1, 5, k % 2 ? '#f4c20d' : '#d94b2b')
+    }
   }
   // growing core (steel frame lower, concrete floors)
   const cur = Math.max(2, h * prog)
-  const m = edge + fence * 0.15
+  const m = edge + (Math.min(fp.w, fp.d) - 2 * edge) * 0.15
   const floors = Math.floor(cur / 10)
   for (let f = 0; f < floors; f++) {
-    boxAt(ctx, at, m, m, size - 2 * m, size - 2 * m, 8, '#b9b5ac', { z0: 2 + f * 10, alpha: f > floors - 3 ? 0.9 : 1 })
+    bodyAt(ctx, at, fp, m, 8, '#b9b5ac', { z0: 2 + f * 10, alpha: f > floors - 3 ? 0.9 : 1 })
   }
-  drawDoor(ctx, b.gx, b.gy, size, b.facing, m, 2)
+  drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 2)
   // steel beams
   const top = 2 + cur
-  const corners: [number, number][] = [[m, m], [size - m, m], [size - m, size - m], [m, size - m]]
-  corners.forEach(([x, y]) => { const q = iso(x, y); line(ctx, [[q.x, q.y - 2], [q.x, q.y - top - 6]], '#c0562a', 2) })
-  // scaffolding on two adjacent faces
+  for (const [x, y] of footprintOutline(fp, m)) { const q = iso(x, y); line(ctx, [[q.x, q.y - 2], [q.x, q.y - top - 6]], '#c0562a', 2) }
+  // scaffolding on the faces pointing right and down
   const sh = Math.min(top, 2 + cur) + 4
-  for (const [x1, y1, x2, y2] of [[edge, size - edge, size - edge, size - edge], [size - edge, size - edge, size - edge, edge]]) {
+  for (const [[x1, y1], [x2, y2]] of outline(edge)) {
+    if (!(y2 > y1 || x2 < x1)) continue
     const a = iso(x1, y1), c = iso(x2, y2)
     line(ctx, [[a.x, a.y - 2], [a.x, a.y - sh]], '#e8c547')
     line(ctx, [[c.x, c.y - 2], [c.x, c.y - sh]], '#e8c547')
@@ -611,18 +689,19 @@ function drawSite(ctx: Ctx, b: Placed, prog: number, h: number, time: number, pa
 }
 
 function drawProgressBar(ctx: Ctx, b: Placed, prog: number) {
-  const { size } = b
-  const lb = toIso(b.gx + size / 2, b.gy + size / 2)
-  ctx.fillStyle = '#0006'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40, 5)
-  ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + size * 16 + 6, 40 * prog, 5)
+  const { fp } = b
+  const lb = toIso(b.gx + fp.w / 2, b.gy + fp.d / 2)
+  const off = (fp.w + fp.d) * 8 + 6
+  ctx.fillStyle = '#0006'; ctx.fillRect(lb.x - 20, lb.y + off, 40, 5)
+  ctx.fillStyle = '#4ade80'; ctx.fillRect(lb.x - 20, lb.y + off, 40 * prog, 5)
 }
 
 function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
-  const { size } = b
+  const { fp } = b
   const at = frameOf(b)
   const iso = (a: number, c: number) => toIso(...at(a, c))
   const top = 2 + Math.max(2, h * prog)
-  const [CRANE_X, CRANE_Y] = craneBase(size)
+  const [CRANE_X, CRANE_Y] = craneBase(fp)
   const base = iso(CRANE_X, CRANE_Y)
   const mast = Math.max(h, 30) + 40
   const bx = base.x, by = base.y - 2
@@ -634,7 +713,7 @@ function drawCrane(ctx: Ctx, b: Placed, prog: number, h: number, time: number) {
     for (let z = 0; z < mast; z += 10) line(ctx, [[bx - 3, by - z], [bx + 3, by - z - 10]], '#f2a900', 1)
   }
   // jib overhangs the building toward the centre, in world space so it stays visible from every angle
-  const bw = at(CRANE_X, CRANE_Y), cw = at(size / 2, size / 2)
+  const bw = at(CRANE_X, CRANE_Y), cw = at(fp.w / 2, fp.d / 2)
   const JIB_SKEW = 15 * Math.PI / 180 // keeps the jib from ever lining up exactly with the camera axis
   const dx = cw[0] - bw[0], dy = cw[1] - bw[1]
   let seed = 2166136261
@@ -706,7 +785,7 @@ export interface Traffic {
 export interface Camera { x: number; y: number; zoom: number; angle: number }
 
 export type Preview =
-  | { kind: 'building'; gx: number; gy: number; size: number; height: number; facing: Facing; ok: boolean }
+  | { kind: 'building'; gx: number; gy: number; fp: Footprint; height: number; facing: Facing; ok: boolean }
   | { kind: 'road'; mode: 'add' | 'delete'; edges: string[] }
   | { kind: 'grid' }
 
@@ -734,7 +813,7 @@ export function formatRemaining(b: Placed, elapsed: number) {
 
 function viewDepth(b: Placed, angle: number) {
   // The projected vertical axis determines which footprint is farther away.
-  return toIso(b.gx + b.size / 2, b.gy + b.size / 2, angle).y + b.size
+  return toIso(b.gx + b.fp.w / 2, b.gy + b.fp.d / 2, angle).y + (b.fp.w + b.fp.d) / 2
 }
 
 export const carCountFor = (n: number) => (n < 1 ? 0 : Math.min(30, n * 2))
@@ -1082,21 +1161,21 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   const items: { b: Placed; crane: boolean; depth: number }[] = []
   for (const b of s.placed) {
     items.push({ b, crane: false, depth: viewDepth(b, s.cam.angle) })
-    if (b.size > 1 && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
+    if ((b.fp.w > 1 || b.fp.d > 1) && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
   }
   items.sort((a, c) => a.depth - c.depth || a.b.gx - c.b.gx || Number(a.crane) - Number(c.crane))
   for (const { b, crane } of items) {
     const prog = progressOf(b, s.elapsed)
     if (prog <= 0) continue
     const fh = finalHeight(b.p)
-    const bc = toIso(b.gx + b.size / 2, b.gy + b.size / 2)
-    const pad = b.size * TILE_W + 100
+    const bc = toIso(b.gx + b.fp.w / 2, b.gy + b.fp.d / 2)
+    const pad = Math.max(b.fp.w, b.fp.d) * TILE_W + 100
     if (bc.x + pad < vx0 || bc.x - pad > vx1 || bc.y + pad < vy0 || bc.y - pad - fh - 120 > vy1) continue
     if (crane) { drawSite(ctx, b, prog, fh, s.time, 'crane'); continue }
     if (prog < 1) drawSite(ctx, b, prog, fh, s.time, 'site')
     else drawFinished(ctx, b, fh, s.time)
     if (s.selected === b.p.id) {
-      diamond(ctx, b.gx - 0.1, b.gy - 0.1, b.size + 0.2, b.size + 0.2, 0, 'rgba(255,255,255,0.25)', '#fff')
+      poly(ctx, footprintOutline(b.fp, -0.1).map(([x, y]) => { const q = toIso(b.gx + x, b.gy + y); return [q.x, q.y] as [number, number] }), 'rgba(255,255,255,0.25)', '#fff')
     }
   }
   for (const b of s.placed) {
@@ -1128,7 +1207,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
         cands.add(edgeKey(x, y, 'v')); cands.add(edgeKey(x, y - 1, 'v'))
       }
       if (!s.roads.size) {
-        for (const b of s.placed) for (const f of [0, 1, 2, 3] as Facing[]) for (const k of frontEdges(b.gx, b.gy, b.size, f)) cands.add(k)
+        for (const b of s.placed) for (const f of [0, 1, 2, 3] as Facing[]) for (const k of frontEdges(b.gx, b.gy, b.fp, f)) cands.add(k)
       }
       const rv = roadVertices(s.roads)
       for (const key of cands) if (!roadError(key, s.placed, s.roads, rv)) open.add(key)
@@ -1148,15 +1227,15 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
       }
     }
   } else if (pv?.kind === 'building') {
-    const { gx, gy, size, height, facing, ok } = pv
-    diamond(ctx, gx, gy, size, size, 0, ok ? 'rgba(74,222,128,0.35)' : 'rgba(248,113,113,0.35)', ok ? '#4ade80' : '#f87171')
+    const { gx, gy, fp, height, facing, ok } = pv
+    poly(ctx, footprintOutline(fp).map(([x, y]) => { const q = toIso(gx + x, gy + y); return [q.x, q.y] as [number, number] }), ok ? 'rgba(74,222,128,0.35)' : 'rgba(248,113,113,0.35)', ok ? '#4ade80' : '#f87171')
     const at = frameOf({ gx, gy })
     const m = BUILDING_MARGIN
-    boxAt(ctx, at, m, m, size - 2 * m, size - 2 * m, height, ok ? '#e5e7eb' : '#fca5a5', { alpha: 0.35 })
-    drawDoor(ctx, gx, gy, size, facing, m, 0, 0.7)
+    bodyAt(ctx, at, fp, m, height, ok ? '#e5e7eb' : '#fca5a5', { alpha: 0.35 })
+    drawDoor(ctx, gx, gy, fp, facing, m, 0, 0.7)
     ctx.save()
     ctx.setLineDash([6, 5])
-    for (const key of frontEdges(gx, gy, size, facing)) {
+    for (const key of frontEdges(gx, gy, fp, facing)) {
       const [a, b] = parseEdge(key)
       const qa = toIso(a[0], a[1]), qb = toIso(b[0], b[1])
       line(ctx, [[qa.x, qa.y], [qb.x, qb.y]], ok ? '#4ade80' : '#f87171', 3)
@@ -1189,7 +1268,7 @@ export function pick(placed: Placed[], elapsed: number, sx: number, sy: number, 
       const rotated = toGrid(screenX, screenY + z)
       const gx = rotated.gx * cos + rotated.gy * sin
       const gy = -rotated.gx * sin + rotated.gy * cos
-      if (gx >= b.gx && gx <= b.gx + b.size && gy >= b.gy && gy <= b.gy + b.size) return b
+      if (gx >= b.gx && gx <= b.gx + b.fp.w && gy >= b.gy && gy <= b.gy + b.fp.d && !(b.fp.notch && gx > b.gx + b.fp.notch[0] && gy > b.gy + b.fp.notch[1])) return b
     }
   }
   return undefined
@@ -1198,6 +1277,6 @@ export function pick(placed: Placed[], elapsed: number, sx: number, sy: number, 
 export const centerOn = (b: Placed, cur?: Camera): Camera => {
   const angle = cur?.angle ?? 0
   const zoom = cur?.zoom ?? 1.2
-  const c = toIso(b.gx + b.size / 2, b.gy + b.size / 2, angle)
+  const c = toIso(b.gx + b.fp.w / 2, b.gy + b.fp.d / 2, angle)
   return { x: -c.x * zoom, y: (-c.y + finalHeight(b.p) / 2) * zoom, zoom, angle }
 }
