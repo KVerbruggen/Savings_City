@@ -1,13 +1,9 @@
-import { type Project, timeSaved } from './services/storageService'
+import { type Project } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
-// Floors follow MAX_FLOORS * (min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS)^FLOOR_CURVE_POWER.
-// 5h saved ≈ 6 floors, 50h = 20, 200h ≈ 46, 500h ≈ 69; 1000h and above = MAX_FLOORS.
-const MAX_FLOORS = 100
-const MAX_FLOOR_HOURS = 1000
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
-const FLOOR_CURVE_POWER = 0.537 // <1 gives a steep start that flattens out
+const FLOOR_CURVE_POWER = 0.579 // <1 gives a steep start that flattens out; puts ~33h at the 2x2 -> 3x3 switch
 const FLOOR_HEIGHT = 10 // px per floor
 let projectionAngle = 0
 
@@ -32,8 +28,21 @@ export const toGrid = (x: number, y: number) => ({
   gy: y / TILE_H - x / TILE_W,
 })
 
-export const footprint = (p: Project) =>
-  p.time_estimated_no_ai < 40 ? 1 : p.time_estimated_no_ai <= 160 ? 2 : 3
+// One curve decides both footprint and floors. Each size covers a floor range [min, max]; the ranges are laid end to end,
+// so passing a size's max floors overflows into the next size's min floors. Estimated hours without AI, the same input the footprint always used (capped at MAX_CURVE_HOURS),
+// are mapped through the curve onto that sequence of (size, floors) steps.
+const SIZE_FLOORS: [number, number][] = [[1, 3], [1, 10], [5, 15], [5, 30], [10, 50]] // index + 1 = footprint size
+const MAX_CURVE_HOURS = 1000
+const STEPS = SIZE_FLOORS.flatMap(([min, max], i) =>
+  Array.from({ length: max - min + 1 }, (_, k): [number, number] => [i + 1, min + k]))
+
+const stepOf = (p: Project) => {
+  const hours = Math.min(Math.max(0, p.time_estimated_no_ai), MAX_CURVE_HOURS)
+  const t = Math.pow(hours / MAX_CURVE_HOURS, FLOOR_CURVE_POWER)
+  return STEPS[Math.round(t * (STEPS.length - 1))]
+}
+
+export const footprint = (p: Project) => stepOf(p)[0]
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -445,11 +454,7 @@ function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing
   ctx.restore()
 }
 
-export const finalHeight = (p: Project) => {
-  const hours = Math.max(0, timeSaved(p))
-  const floors = MAX_FLOORS * Math.pow(Math.min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS, FLOOR_CURVE_POWER)
-  return Math.max(10, floors * FLOOR_HEIGHT)
-}
+export const finalHeight = (p: Project) => stepOf(p)[1] * FLOOR_HEIGHT
 
 /** Project-name sign standing on the roof edge above the front-door wall A-B. It lies in the wall's plane, so it foreshortens
  * with the map rotation and is skipped when the wall faces away or is seen too edge-on. */
@@ -527,7 +532,7 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
       poly(ctx, [[pts[i].x, pts[i].y - h], [pts[j].x, pts[j].y - h], [apex.x, apexY]], shade(roofColor, f))
     tri((near + 3) % 4, near, 0.9)
     tri(near, (near + 1) % 4, 1.05)
-  } else if (size === 3) {
+  } else if (size >= 3) {
     // roof block in the back-right corner as seen from outside the door
     const n = NORMALS[b.facing]
     const back: V2 = [-n[0], -n[1]], right: V2 = [n[1], -n[0]]
