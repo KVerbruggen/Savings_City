@@ -1077,7 +1077,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   const items: { b: Placed; crane: boolean; depth: number }[] = []
   for (const b of s.placed) {
     items.push({ b, crane: false, depth: viewDepth(b, s.cam.angle) })
-    if (progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
+    if (b.size > 1 && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
   }
   items.sort((a, c) => a.depth - c.depth || a.b.gx - c.b.gx || Number(a.crane) - Number(c.crane))
   for (const { b, crane } of items) {
