@@ -1,4 +1,4 @@
-import { type Project, timeSaved } from './services/storageService'
+import { type Project } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
@@ -29,7 +29,7 @@ export const toGrid = (x: number, y: number) => ({
 })
 
 // One curve decides both footprint and floors. Each size covers a floor range [min, max]; the ranges are laid end to end,
-// so passing a size's max floors overflows into the next size's min floors. Hours saved (capped at MAX_CURVE_HOURS)
+// so passing a size's max floors overflows into the next size's min floors. Estimated hours without AI, the same input the footprint always used (capped at MAX_CURVE_HOURS),
 // are mapped through the curve onto that sequence of (size, floors) steps.
 const SIZE_FLOORS: [number, number][] = [[1, 3], [1, 10], [5, 15], [5, 30], [10, 50]] // index + 1 = footprint size
 const MAX_CURVE_HOURS = 1000
@@ -37,7 +37,7 @@ const STEPS = SIZE_FLOORS.flatMap(([min, max], i) =>
   Array.from({ length: max - min + 1 }, (_, k): [number, number] => [i + 1, min + k]))
 
 const stepOf = (p: Project) => {
-  const hours = Math.min(Math.max(0, timeSaved(p)), MAX_CURVE_HOURS)
+  const hours = Math.min(Math.max(0, p.time_estimated_no_ai), MAX_CURVE_HOURS)
   const t = Math.pow(hours / MAX_CURVE_HOURS, FLOOR_CURVE_POWER)
   return STEPS[Math.round(t * (STEPS.length - 1))]
 }
