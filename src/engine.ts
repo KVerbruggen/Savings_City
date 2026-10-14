@@ -3,7 +3,7 @@ import { type Project } from './services/storageService'
 export const TILE_W = 64
 export const TILE_H = 32
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
-const FLOOR_CURVE_POWER = 0.663 // <1 gives a steep start that flattens out; puts ~4.5h at the 1x1 -> 2x2 switch
+const FLOOR_CURVE_POWER = 0.579 // <1 gives a steep start that flattens out; puts ~33h at the 2x2 -> 3x3 switch
 const FLOOR_HEIGHT = 10 // px per floor
 let projectionAngle = 0
 
