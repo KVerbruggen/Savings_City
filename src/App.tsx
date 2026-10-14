@@ -372,8 +372,21 @@ export default function App() {
       const old = projects.find((p) => p.id === editingId)
       const updated = old && { ...old, ...values }
       const resized = !!old && !!updated && typeof old.gx === 'number' && footprint(updated) !== footprint(old)
-      if (resized && updated) {
-        // The footprint tier changed: clear the position and make the user re-place it.
+      let anchored: { gx: number; gy: number } | undefined
+      if (resized && updated && old) {
+        // Scale around the door: the front edge stays put and the door stays centred on the same spot.
+        const f = (old.facing ?? 2) as Facing, d = footprint(old) - footprint(updated), ox = old.gx as number, oy = old.gy as number
+        const sx = f === 1 ? d : f === 3 ? 0 : d / 2, sy = f === 2 ? d : f === 0 ? 0 : d / 2
+        const others = stateRef.current.placed
+        const xs = [...new Set([Math.floor(ox + sx), Math.ceil(ox + sx)])], ys = [...new Set([Math.floor(oy + sy), Math.ceil(oy + sy)])]
+        for (const x of xs) for (const y of ys)
+          if (!anchored && !placementError(x, y, footprint(updated), f, others, roads, old.id)) anchored = { gx: x, gy: y }
+      }
+      if (resized && updated && anchored) {
+        await dataService.update(editingId, { ...values, ...anchored })
+        setProjects(await dataService.list())
+      } else if (resized && updated) {
+        // No valid position around the door: clear the position and make the user re-place it.
         await dataService.update(editingId, { ...values, gx: null, gy: null })
         setProjects(await dataService.list())
         setPlacing({ id: updated.id, name: updated.name, size: footprint(updated), height: finalHeight(updated), facing: updated.facing ?? 2 })
@@ -398,6 +411,7 @@ export default function App() {
   }
 
   const edit = (p: Project) => {
+    setTip(undefined)
     setEditingId(p.id)
     setForm({
       name: p.name, description: p.description,
