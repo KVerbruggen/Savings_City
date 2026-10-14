@@ -2,10 +2,7 @@ import { type Project, timeSaved } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
-// Floors follow MAX_FLOORS * (min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS)^FLOOR_CURVE_POWER.
-// 1000h and above = MAX_FLOORS; each footprint size then clamps to its own range.
-const MAX_FLOORS = 50
-const MAX_FLOOR_HOURS = 1000
+// Each footprint size has its own floor curve: min + (max - min) * (min(hours saved, size hours) / size hours)^FLOOR_CURVE_POWER.
 const BUILDING_MARGIN = 0.3 // clears the sidewalk (0.24 from the road centre line)
 const FLOOR_CURVE_POWER = 0.537 // <1 gives a steep start that flattens out
 const FLOOR_HEIGHT = 10 // px per floor
@@ -35,8 +32,11 @@ export const toGrid = (x: number, y: number) => ({
 export const footprint = (p: Project) =>
   p.time_estimated_no_ai <= 8 ? 1 : p.time_estimated_no_ai <= 40 ? 2 : p.time_estimated_no_ai <= 160 ? 3 : p.time_estimated_no_ai < 1000 ? 4 : 5
 
-// Floor range per footprint size; a larger building starts taller so the jump in size never makes it look shorter.
-const FLOOR_RANGE_BY_SIZE: Record<number, [number, number]> = { 1: [1, 3], 2: [1, 10], 3: [5, 15], 4: [5, 30], 5: [10, 50] }
+// [min floors, max floors, hours saved at which the max is reached] per footprint size. Moving to a larger size already
+// grows the building on the ground, so its floor count may drop back to its own minimum.
+const FLOOR_CURVE_BY_SIZE: Record<number, [number, number, number]> = {
+  1: [1, 3, 8], 2: [1, 10, 40], 3: [5, 15, 160], 4: [5, 30, 1000], 5: [10, 50, 1000],
+}
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -450,10 +450,9 @@ function drawDoor(ctx: Ctx, gx: number, gy: number, size: number, facing: Facing
 
 export const finalHeight = (p: Project) => {
   const hours = Math.max(0, timeSaved(p))
-  const floors = MAX_FLOORS * Math.pow(Math.min(hours, MAX_FLOOR_HOURS) / MAX_FLOOR_HOURS, FLOOR_CURVE_POWER)
-  const size = footprint(p)
-  const [min, max] = FLOOR_RANGE_BY_SIZE[size] ?? [1, MAX_FLOORS]
-  return Math.min(max, Math.max(min, floors)) * FLOOR_HEIGHT
+  const [min, max, maxHours] = FLOOR_CURVE_BY_SIZE[footprint(p)]
+  const floors = min + (max - min) * Math.pow(Math.min(hours, maxHours) / maxHours, FLOOR_CURVE_POWER)
+  return floors * FLOOR_HEIGHT
 }
 
 /** Project-name sign standing on the roof edge above the front-door wall A-B. It lies in the wall's plane, so it foreshortens
