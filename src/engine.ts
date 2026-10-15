@@ -63,6 +63,7 @@ export const floorsOf = (p: Project) => {
 const orientCache = new WeakMap<Footprint, Footprint[]>()
 /** Footprints turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. */
 export const orient = (fp: Footprint, facing: Facing): Footprint => {
+  if (fp === null || typeof fp !== 'object') return fp
   const base = fp.base ?? fp
   let list = orientCache.get(base)
   if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({
