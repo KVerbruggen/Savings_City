@@ -61,25 +61,32 @@ export const floorsOf = (p: Project) => {
 }
 
 const orientCache = new WeakMap<Footprint, Footprint[]>()
-/** L-shapes turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. Rectangles are unchanged. */
+/** Footprints turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. */
 export const orient = (fp: Footprint, facing: Facing): Footprint => {
   const base = fp.base ?? fp
-  if (!base.notch) return base
   let list = orientCache.get(base)
-  if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({ ...base, rot: r, base })))
+  if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({
+    ...base, w: r % 2 ? base.d : base.w, d: r % 2 ? base.w : base.d, rot: r, base,
+  })))
   return list[facing]
 }
 
 const turnPoint = (fp: Footprint, [x, y]: V2): V2 => {
-  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [fp.w - y, x]
+  const base = fp.base ?? fp
+  let w = base.w, d = base.d
+  for (let k = 0; k < (fp.rot ?? 0); k++) {
+    [x, y] = [d - y, x]
+    ;[w, d] = [d, w]
+  }
   return [x, y]
 }
 
 /** Rectangles (x, y, w, d in the local frame) covering the footprint, inset by m on every outer side. Two parts abut along a shared plane. */
 export const footprintRects = (fp: Footprint, m = 0): [number, number, number, number][] => {
   if (!fp.notch) return [[m, m, fp.w - 2 * m, fp.d - 2 * m]]
-  const [b, a] = fp.notch
-  const rects: [number, number, number, number][] = [[m, m, fp.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, fp.d - a]]
+  const base = fp.base ?? fp
+  const [b, a] = base.notch!
+  const rects: [number, number, number, number][] = [[m, m, base.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, base.d - a]]
   return rects.map(([x, y, w, d]) => {
     const p = turnPoint(fp, [x, y]), q = turnPoint(fp, [x + w, y + d])
     return [Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.abs(q[0] - p[0]), Math.abs(q[1] - p[1])]
@@ -88,17 +95,22 @@ export const footprintRects = (fp: Footprint, m = 0): [number, number, number, n
 
 /** Outline of the footprint inset by m, clockwise in map space. */
 export const footprintOutline = (fp: Footprint, m = 0): V2[] => {
-  const { w, d } = fp
-  if (!fp.notch) return [[m, m], [w - m, m], [w - m, d - m], [m, d - m]]
-  const [b, a] = fp.notch
-  const pts: V2[] = [[m, m], [w - m, m], [w - m, a - m], [b - m, a - m], [b - m, d - m], [m, d - m]]
+  if (!fp.notch) return [[m, m], [fp.w - m, m], [fp.w - m, fp.d - m], [m, fp.d - m]]
+  const base = fp.base ?? fp
+  const [b, a] = base.notch!
+  const pts: V2[] = [[m, m], [base.w - m, m], [base.w - m, a - m], [b - m, a - m], [b - m, base.d - m], [m, base.d - m]]
   return pts.map((q) => turnPoint(fp, q))
 }
 
 export const hasCell = (fp: Footprint, x: number, y: number) => {
   if (x < 0 || y < 0 || x >= fp.w || y >= fp.d) return false
-  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [y, fp.w - 1 - x]
-  return !(fp.notch && x >= fp.notch[0] && y >= fp.notch[1])
+  let w = fp.w, d = fp.d
+  for (let k = 0; k < (fp.rot ?? 0); k++) {
+    [x, y] = [y, w - 1 - x]
+    ;[w, d] = [d, w]
+  }
+  const base = fp.base ?? fp
+  return !(base.notch && x >= base.notch[0] && y >= base.notch[1])
 }
 
 /** Occupied cells (local frame). */
@@ -107,8 +119,10 @@ const cellsOf = (fp: Footprint): V2[] => {
   for (let x = 0; x < fp.w; x++) for (let y = 0; y < fp.d; y++) if (hasCell(fp, x, y)) out.push([x, y])
   return out
 }
-const footprintCellCount = (fp: Footprint) =>
-  fp.w * fp.d - (fp.notch ? (fp.w - fp.notch[0]) * (fp.d - fp.notch[1]) : 0)
+const footprintCellCount = (fp: Footprint) => {
+  const base = fp.base ?? fp
+  return base.w * base.d - (base.notch ? (base.w - base.notch[0]) * (base.d - base.notch[1]) : 0)
+}
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
