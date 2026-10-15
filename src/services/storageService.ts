@@ -14,6 +14,8 @@ export interface Project {
   gy?: number | null
   /** Door side: 0 = -y, 1 = +x, 2 = +y, 3 = -x. Defaults to 2. */
   facing?: 0 | 1 | 2 | 3
+  /** Base building color as #rrggbb. Missing = derived from the id. */
+  color?: string
 }
 
 export type NewProject = Omit<Project, 'id' | 'created_at'>

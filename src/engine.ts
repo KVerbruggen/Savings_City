@@ -376,10 +376,14 @@ function shadeRaw(hex: string, f: number) {
 
 /** Stable pseudo-random building color derived from the project id. */
 const colorCache = new Map<string, string>()
-function randomColor(id: string) {
+export function buildingColor(id: string) {
   let c = colorCache.get(id)
   if (!c) colorCache.set(id, c = randomColorRaw(id))
   return c
+}
+/** Random pleasant base color for a newly constructed building. */
+export function randomBuildingColor() {
+  return randomColorRaw(String(Math.random()) + Date.now())
 }
 function randomColorRaw(id: string) {
   let h = 2166136261
@@ -604,7 +608,7 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const { p, fp } = b
   const at = frameOf(b)
   const rich = p.budget_spent > 5000, mid = p.budget_spent > 1500
-  const color = randomColor(p.id)
+  const color = p.color ?? buildingColor(p.id)
   const win = rich ? '#ffe36b' : '#d8f4ff'
   const m = BUILDING_MARGIN
   const single = fp.w === 1 && fp.d === 1
