@@ -1,4 +1,4 @@
-import { type Project } from './services/storageService'
+import { type Project, type Settings, DEFAULT_SETTINGS } from './services/storageService'
 
 export const TILE_W = 64
 export const TILE_H = 32
@@ -27,13 +27,15 @@ export const toGrid = (x: number, y: number) => ({
 })
 
 /** Building footprint in grid cells. L-shapes are the w x d bounding box minus the corner region x >= notch.x, y >= notch.y. */
-export interface Footprint { name: string; w: number; d: number; notch?: V2; maxFloors: number; rot?: number; base?: Footprint }
+export interface Footprint { name: string; w: number; d: number; notch?: V2; minSide: number; rot?: number; base?: Footprint }
 
-// Max floors by the narrowest part of the footprint: 1 wide = 3 floors, 5 wide = 50 floors.
-const MAX_FLOORS_BY_WIDTH: Record<number, number> = { 1: 3, 2: 10, 3: 15, 4: 30, 5: 50 }
-const rectFp = (w: number, d: number): Footprint => ({ name: `${w}x${d}`, w, d, maxFloors: MAX_FLOORS_BY_WIDTH[Math.min(w, d)] })
+let settings: Settings = DEFAULT_SETTINGS
+export const setSettings = (s: Settings) => { settings = s }
+/** Max floors by the narrowest part of the footprint (configurable in settings). */
+export const maxFloorsOf = (fp: Footprint) => settings.maxFloorsByWidth[fp.minSide]
+const rectFp = (w: number, d: number): Footprint => ({ name: `${w}x${d}`, w, d, minSide: Math.min(w, d) })
 const lFp = (w: number, d: number, notch: V2, name: string): Footprint =>
-  ({ name, w, d, notch, maxFloors: MAX_FLOORS_BY_WIDTH[Math.min(notch[0], notch[1], w - notch[0], d - notch[1])] })
+  ({ name, w, d, notch, minSide: Math.min(notch[0], notch[1], w - notch[0], d - notch[1]) })
 
 // Ordered by number of grid cells.
 export const FOOTPRINTS: Footprint[] = [
@@ -41,14 +43,13 @@ export const FOOTPRINTS: Footprint[] = [
   lFp(4, 4, [2, 2], '2x4+2x2'), rectFp(3, 4), rectFp(3, 5), rectFp(4, 4), rectFp(4, 5), rectFp(5, 5),
 ]
 
-const FOOTPRINT_CURVE_POWER = 0.579 // <1 gives a steep start that flattens out
 const MAX_CURVE_HOURS = 1000
 const FLOOR_HEIGHT = 10 // px per floor
 
 /** Footprint depends only on the estimated hours without AI. */
 export const footprint = (p: Project): Footprint => {
   const hours = Math.min(Math.max(0, p.time_estimated_no_ai), MAX_CURVE_HOURS)
-  const t = Math.pow(hours / MAX_CURVE_HOURS, FOOTPRINT_CURVE_POWER)
+  const t = Math.pow(hours / MAX_CURVE_HOURS, settings.footprintCurve)
   return FOOTPRINTS[Math.min(FOOTPRINTS.length - 1, Math.floor(t * FOOTPRINTS.length))]
 }
 
@@ -56,7 +57,7 @@ export const footprint = (p: Project): Footprint => {
 export const floorsOf = (p: Project) => {
   const est = p.time_estimated_no_ai
   const saved = est > 0 ? Math.min(1, Math.max(0, (est - Math.max(0, p.time_spent_ai)) / est)) : 0
-  return 1 + Math.round(saved * (footprint(p).maxFloors - 1))
+  return 1 + Math.round(Math.pow(saved, settings.heightCurve) * (maxFloorsOf(footprint(p)) - 1))
 }
 
 const orientCache = new WeakMap<Footprint, Footprint[]>()

@@ -190,3 +190,49 @@ export const timeSavingsRatio = (p: Project) =>
   p.time_estimated_no_ai > 0 ? timeSaved(p) / p.time_estimated_no_ai : 0
 export const costEfficiency = (p: Project, rate: number) =>
   p.budget_spent > 0 ? (timeSaved(p) * rate) / p.budget_spent : 0
+
+/** User-adjustable settings, persisted with the rest of the save. */
+export interface Settings {
+  /** Max floors by the shortest side of a footprint (keys "1".."5"). */
+  maxFloorsByWidth: Record<number, number>
+  /** Exponent applied to hours/1000 when choosing a footprint (<1 = steep start). */
+  footprintCurve: number
+  /** Exponent applied to the time-saved fraction when choosing height (1 = linear). */
+  heightCurve: number
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  maxFloorsByWidth: { 1: 3, 2: 10, 3: 15, 4: 30, 5: 50 },
+  footprintCurve: 0.579,
+  heightCurve: 1,
+}
+
+const SETTINGS_KEY = 'savings_city_settings'
+
+const num = (v: unknown, fallback: number, min: number, max: number) =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : fallback
+
+export function normalizeSettings(raw: Partial<Settings> | undefined): Settings {
+  const floors: Record<number, number> = {}
+  for (const w of Object.keys(DEFAULT_SETTINGS.maxFloorsByWidth).map(Number))
+    floors[w] = Math.round(num(raw?.maxFloorsByWidth?.[w], DEFAULT_SETTINGS.maxFloorsByWidth[w], 1, 500))
+  return {
+    maxFloorsByWidth: floors,
+    footprintCurve: num(raw?.footprintCurve, DEFAULT_SETTINGS.footprintCurve, 0.05, 10),
+    heightCurve: num(raw?.heightCurve, DEFAULT_SETTINGS.heightCurve, 0.05, 10),
+  }
+}
+
+export function loadSettings(): Settings {
+  ensureCompatibleSave()
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    return normalizeSettings(raw === null ? undefined : (JSON.parse(raw) as Partial<Settings>))
+  } catch {
+    return normalizeSettings(undefined)
+  }
+}
+
+export function saveSettings(s: Settings) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)) } catch { /* storage unavailable */ }
+}
