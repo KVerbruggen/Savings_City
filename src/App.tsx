@@ -34,6 +34,35 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([])
   const [settings, setSettingsState] = useState<Settings>(loadSettings)
   const [showSettings, setShowSettings] = useState(false)
+  const toDraft = (st: Settings) => ({ ...Object.fromEntries([1, 2, 3, 4, 5].map((w) => [`w${w}`, String(st.maxFloorsByWidth[w])])), fc: String(st.footprintCurve), hc: String(st.heightCurve) } as Record<string, string>)
+  const [draft, setDraft] = useState<Record<string, string>>(() => toDraft(settings))
+  const [draftErrors, setDraftErrors] = useState<Record<string, string>>({})
+  const applyDraft = () => {
+    const errs: Record<string, string> = {}
+    const num = (k: string) => {
+      const v = draft[k].trim()
+      const n = Number(v)
+      if (v === '' || !Number.isFinite(n) || n === 0) { errs[k] = 'Enter a value greater than 0'; return 0 }
+      if (k.startsWith('w') && n > 500) { errs[k] = 'Maximum is 500'; return 0 }
+      return n
+    }
+    const maxFloorsByWidth = { ...settings.maxFloorsByWidth }
+    for (const w of [1, 2, 3, 4, 5]) maxFloorsByWidth[w] = num(`w${w}`)
+    const footprintCurve = num('fc')
+    const heightCurve = num('hc')
+    setDraftErrors(errs)
+    if (Object.keys(errs).length) return
+    const n = normalizeSettings({ ...settings, maxFloorsByWidth, footprintCurve, heightCurve })
+    saveSettings(n); setSettingsState(n); setDraft(toDraft(n))
+  }
+  const field = (k: string) => (
+    <>
+      <input type="number" step="any" max={k.startsWith('w') ? 500 : undefined} value={draft[k]}
+        onChange={(e) => { setDraft({ ...draft, [k]: e.target.value }); setDraftErrors(({ [k]: _, ...r }) => r) }}
+        className={`w-20 rounded bg-slate-800 px-2 py-1 text-right ${draftErrors[k] ? 'border border-red-500' : ''}`} />
+      {draftErrors[k] && <span className="mt-0.5 block text-right text-[10px] text-red-400">{draftErrors[k]}</span>}
+    </>
+  )
   setSettings(settings)
   const updateSettings = (next: Settings) => { const n = normalizeSettings(next); saveSettings(n); setSettingsState(n) }
   const [form, setForm] = useState({ ...EMPTY_FORM, color: '#888888' })
@@ -555,7 +584,7 @@ export default function App() {
             onPointerDown={() => { if (smoothRotation()) buttonRot.current = -1 }} onPointerUp={() => { buttonRot.current = 0 }}
             onPointerLeave={() => { buttonRot.current = 0 }} onPointerCancel={() => { buttonRot.current = 0 }} aria-label="Rotate view right">↻</button>
           <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => (camRef.current = { ...HOME })} aria-label="Recenter">⌖</button>
-          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => setShowSettings((v) => !v)} aria-label="Settings" title="Settings">⚙</button>
+          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => { setDraft(toDraft(settings)); setDraftErrors({}); setShowSettings((v) => !v) }} aria-label="Settings" title="Settings">⚙</button>
         </div>
         {showSettings && (
           <div className="absolute right-14 top-3 w-72 rounded-lg bg-slate-900/95 p-3 text-xs text-slate-200 shadow-lg">
@@ -565,26 +594,23 @@ export default function App() {
             </div>
             <div className="mb-1 uppercase text-slate-400">Max floors by shortest side</div>
             {[1, 2, 3, 4, 5].map((w) => (
-              <label key={w} className="mb-1 flex items-center justify-between">
-                {w}-wide
-                <input type="number" min={1} max={500} step={1} value={settings.maxFloorsByWidth[w]}
-                  onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, maxFloorsByWidth: { ...settings.maxFloorsByWidth, [w]: Number(e.target.value) } })}
-                  className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+              <label key={w} className="mb-1 flex items-start justify-between">
+                <span className="py-1">{w}-wide</span>
+                <span>{field(`w${w}`)}</span>
               </label>
             ))}
-            <label className="mt-2 flex items-center justify-between" title="Exponent on estimated hours / 1000. Below 1 = steep start.">
-              Footprint size curve
-              <input type="number" min={0.05} max={10} step={0.01} value={settings.footprintCurve}
-                onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, footprintCurve: Number(e.target.value) })}
-                className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+            <label className="mt-2 flex items-start justify-between" title="Exponent on estimated hours / 1000. Below 1 = steep start.">
+              <span className="py-1">Footprint size curve</span>
+              <span>{field('fc')}</span>
             </label>
-            <label className="mt-1 flex items-center justify-between" title="Exponent on fraction of time saved. 1 = linear.">
-              Height curve
-              <input type="number" min={0.05} max={10} step={0.01} value={settings.heightCurve}
-                onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, heightCurve: Number(e.target.value) })}
-                className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+            <label className="mt-1 flex items-start justify-between" title="Exponent on fraction of time saved. 1 = linear.">
+              <span className="py-1">Height curve</span>
+              <span>{field('hc')}</span>
             </label>
-            <button type="button" className="mt-3 rounded border border-slate-500 px-3 py-1 hover:bg-slate-700" onClick={() => updateSettings(DEFAULT_SETTINGS)}>Reset to defaults</button>
+            <div className="mt-3 flex gap-2">
+              <button type="button" className="rounded bg-sky-600 px-3 py-1 hover:bg-sky-500" onClick={applyDraft}>Apply</button>
+            <button type="button" className="rounded border border-slate-500 px-3 py-1 hover:bg-slate-700" onClick={() => { updateSettings(DEFAULT_SETTINGS); setDraft(toDraft(normalizeSettings(DEFAULT_SETTINGS))); setDraftErrors({}) }}>Reset to defaults</button>
+            </div>
           </div>
         )}
         <div className="absolute bottom-4 left-4 flex flex-col items-start gap-3">
