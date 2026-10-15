@@ -107,6 +107,8 @@ const cellsOf = (fp: Footprint): V2[] => {
   for (let x = 0; x < fp.w; x++) for (let y = 0; y < fp.d; y++) if (hasCell(fp, x, y)) out.push([x, y])
   return out
 }
+const footprintCellCount = (fp: Footprint) =>
+  fp.w * fp.d - (fp.notch ? (fp.w - fp.notch[0]) * (fp.d - fp.notch[1]) : 0)
 
 /* ---------------- vector helpers ---------------- */
 const add = (a: V2, b: V2): V2 => [a[0] + b[0], a[1] + b[1]]
@@ -455,7 +457,7 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
       ctx.beginPath()
       for (let r = 0; r < rows; r++) {
         for (let k = 0; k < cols; k++) {
-          const t = ws < 1 ? (dx >= 0 ? 0.42 : 0.58) - 2.5 / length : (k + 0.3) / cols
+          const t = cols === 1 ? 0.5 : (k + 0.3) / cols
           const x = from.x + dx * t, y = from.y + dy * t - z0 - base - r * 12
           ctx.moveTo(x, y); ctx.lineTo(x + wx, y + wy); ctx.lineTo(x + wx, y + wy - 6.5 * ws); ctx.lineTo(x, y - 6.5 * ws); ctx.closePath()
         }
@@ -652,7 +654,9 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const narrow = baseWidth(fp) === 1
   const innerW = fp.w - 2 * m, innerD = fp.d - 2 * m
   const wall: [V2, V2][] = [0, 1, 2, 3].map((f) => frontWall(fp, f as Facing, m).map((q) => at(q[0], q[1])) as [V2, V2])
-  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: narrow ? 0.75 : 1, noWindowsOn: narrow ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
+  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: narrow ? 0.75 : 1, noWindowsOn: narrow
+    ? fp.notch ? [wall[b.facing]] : [wall[b.facing], wall[(b.facing + 2) % 4]]
+    : undefined })
   drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 0, 1, narrow ? win : undefined)
   if (!narrow) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
   // Put bands on the facade before the roof so they cannot paint over its lower half.
@@ -1230,7 +1234,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   const items: { b: Placed; crane: boolean; depth: number }[] = []
   for (const b of s.placed) {
     items.push({ b, crane: false, depth: viewDepth(b, s.cam.angle) })
-    if ((b.fp.w > 1 || b.fp.d > 1) && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
+    if (footprintCellCount(b.fp) > 3 && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
   }
   items.sort((a, c) => a.depth - c.depth || a.b.gx - c.b.gx || Number(a.crane) - Number(c.crane))
   for (const { b, crane } of items) {
