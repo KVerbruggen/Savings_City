@@ -43,6 +43,7 @@ export default function App() {
       const v = draft[k].trim()
       const n = Number(v)
       if (v === '' || !Number.isFinite(n) || n === 0) { errs[k] = 'Enter a value greater than 0'; return 0 }
+      if (k.startsWith('w') && n > 500) { errs[k] = 'Maximum is 500'; return 0 }
       return n
     }
     const maxFloorsByWidth = { ...settings.maxFloorsByWidth }
@@ -56,7 +57,7 @@ export default function App() {
   }
   const field = (k: string) => (
     <>
-      <input type="number" step="any" value={draft[k]}
+      <input type="number" step="any" max={k.startsWith('w') ? 500 : undefined} value={draft[k]}
         onChange={(e) => { setDraft({ ...draft, [k]: e.target.value }); setDraftErrors(({ [k]: _, ...r }) => r) }}
         className={`w-20 rounded bg-slate-800 px-2 py-1 text-right ${draftErrors[k] ? 'border border-red-500' : ''}`} />
       {draftErrors[k] && <span className="mt-0.5 block text-right text-[10px] text-red-400">{draftErrors[k]}</span>}
