@@ -598,10 +598,15 @@ function drawSign(ctx: Ctx, A: V2, B: V2, outward: V2, z: number, name: string, 
   ctx.restore()
   ctx.restore()
 }
+/** Orders rectangles of one building so that the ones farther from the camera are drawn first. */
+function sortFarToNear(at: Frame, rects: [number, number, number, number][]) {
+  const depth = ([x, y, w, d]: [number, number, number, number]) => { const q = at(x + w / 2, y + d / 2); return toIso(q[0], q[1]).y }
+  return rects.sort((a, c) => depth(a) - depth(c))
+}
+
 /** Extruded body of the footprint inset by m; the parts of an L-shape are drawn far one first. */
 function bodyAt(ctx: Ctx, at: Frame, fp: Footprint, m: number, height: number, color: string, opts: Parameters<typeof boxAt>[8] = {}) {
-  const rects = footprintRects(fp, m)
-  if (rects.length > 1 && toIso(0, 1).y <= 0) rects.reverse()
+  const rects = sortFarToNear(at, footprintRects(fp, m))
   for (const [x, y, w, d] of rects) boxAt(ctx, at, x, y, w, d, height, color, opts)
 }
 
@@ -621,14 +626,18 @@ function drawGableRoof(ctx: Ctx, at: Frame, rect: [number, number, number, numbe
   }
   const ridgeStart = point(start, height + roofH), ridgeEnd = point(end, height + roofH)
   const base = eaves.map((q) => point(q, height))
-  poly(ctx, [base[0], base[1], ridgeEnd, ridgeStart], '#9fe3ff')
-  poly(ctx, [ridgeStart, ridgeEnd, base[2], base[3]], shade('#9fe3ff', 0.9))
+  // The roof is convex, so drawing only the faces that point toward the camera needs no further ordering.
+  const faces = (nx: number, ny: number) => toIso(nx, ny).y >= -1e-6
   if (alongX) {
-    poly(ctx, [base[0], ridgeStart, base[3]], shade('#9fe3ff', 0.82))
-    poly(ctx, [ridgeEnd, base[1], base[2]], shade('#9fe3ff', 1.05))
+    if (faces(0, -1)) poly(ctx, [base[0], base[1], ridgeEnd, ridgeStart], '#9fe3ff')
+    if (faces(0, 1)) poly(ctx, [ridgeStart, ridgeEnd, base[2], base[3]], shade('#9fe3ff', 0.9))
+    if (faces(-1, 0)) poly(ctx, [base[0], ridgeStart, base[3]], shade('#9fe3ff', 0.82))
+    if (faces(1, 0)) poly(ctx, [ridgeEnd, base[1], base[2]], shade('#9fe3ff', 1.05))
   } else {
-    poly(ctx, [base[0], base[1], ridgeStart], shade('#9fe3ff', 0.82))
-    poly(ctx, [ridgeEnd, base[2], base[3]], shade('#9fe3ff', 1.05))
+    if (faces(-1, 0)) poly(ctx, [base[0], ridgeStart, ridgeEnd, base[3]], '#9fe3ff')
+    if (faces(1, 0)) poly(ctx, [ridgeStart, base[1], base[2], ridgeEnd], shade('#9fe3ff', 0.9))
+    if (faces(0, -1)) poly(ctx, [base[0], base[1], ridgeStart], shade('#9fe3ff', 0.82))
+    if (faces(0, 1)) poly(ctx, [ridgeEnd, base[2], base[3]], shade('#9fe3ff', 1.05))
   }
 }
 
@@ -661,7 +670,7 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
     tri((near + 3) % 4, near, 0.9)
     tri(near, (near + 1) % 4, 1.05)
   } else if (narrow) {
-    for (const rect of footprintRects(fp, m)) drawGableRoof(ctx, at, rect, h, roofH)
+    for (const rect of sortFarToNear(at, footprintRects(fp, m))) drawGableRoof(ctx, at, rect, h, roofH)
   } else if (block) {
     // roof block in the back-right corner as seen from outside the door
     const n = NORMALS[b.facing]
