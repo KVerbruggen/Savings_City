@@ -58,9 +58,12 @@ export default function App() {
   // startsVersion forces a recompute after the map is mutated when a new
   // building's construction starts.
   // oxlint-disable-next-line refs -- layout() only reads the map at call time; startsVersion re-triggers it after a mutation
-  const placed = useMemo(() => layout(projects, constructionStartsRef.current),
+  const placed = useMemo(() => layout(
+    // Live-preview the colour being edited; cancelling clears editingId so the saved colour returns.
+    showForm && editingId ? projects.map((p) => (p.id === editingId ? { ...p, color: form.color } : p)) : projects,
+    constructionStartsRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startsVersion intentionally invalidates this memo
-    [projects, startsVersion, settings])
+    [projects, startsVersion, settings, showForm, editingId, form.color])
   const [nowTick, setNowTick] = useState(0)
   useEffect(() => {
     const id = setInterval(() => setNowTick(performance.now()), 250)
