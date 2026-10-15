@@ -4,11 +4,13 @@ import {
 } from './services/storageService'
 import {
   type Camera, type Facing, type Footprint, type Placed, type Preview, type Traffic,
-  centerOn, formatRemaining, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
+  buildingColor, randomBuildingColor, centerOn, formatRemaining, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
   placementAt, placementError, setSettings, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
 } from './engine'
 
 type Tool = 'none' | 'road' | 'delete'
+
+const EMPTY_FORM = { name: '', description: '', ai: '', est: '', budget: '' }
 
 const HOME: Camera = { x: 0, y: 0, zoom: 1, angle: 0 }
 
@@ -34,7 +36,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   setSettings(settings)
   const updateSettings = (next: Settings) => { const n = normalizeSettings(next); saveSettings(n); setSettingsState(n) }
-  const [form, setForm] = useState({ name: '', description: '', ai: '', est: '', budget: '' })
+  const [form, setForm] = useState({ ...EMPTY_FORM, color: '#888888' })
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string>()
   const [selected, setSelected] = useState<string>()
@@ -305,7 +307,7 @@ export default function App() {
       e.stopPropagation()
       setShowForm(false)
       setEditingId(undefined)
-      setForm({ name: '', description: '', ai: '', est: '', budget: '' })
+      setForm({ ...EMPTY_FORM, color: '#888888' })
     }
     window.addEventListener('keydown', key, true)
     return () => window.removeEventListener('keydown', key, true)
@@ -368,7 +370,7 @@ export default function App() {
     if (!form.name.trim() || !(ai >= 0) || !(est > 0)) return
     const values = {
       name: form.name.trim(), description: form.description.trim(),
-      time_spent_ai: ai, time_estimated_no_ai: est, budget_spent: Math.max(0, budget),
+      time_spent_ai: ai, time_estimated_no_ai: est, budget_spent: Math.max(0, budget), color: form.color,
     }
     if (editingId) {
       // Keep the original construction start. The new duration is applied to
@@ -409,7 +411,7 @@ export default function App() {
       setRoadMenu(false)
       setPlaceError(undefined)
     }
-    setForm({ name: '', description: '', ai: '', est: '', budget: '' })
+    setForm({ ...EMPTY_FORM, color: '#888888' })
     setEditingId(undefined)
     setShowForm(false)
   }
@@ -420,6 +422,7 @@ export default function App() {
     setForm({
       name: p.name, description: p.description,
       ai: String(p.time_spent_ai), est: String(p.time_estimated_no_ai), budget: String(p.budget_spent),
+      color: p.color ?? buildingColor(p.id),
     })
     setShowForm(true)
   }
@@ -438,7 +441,7 @@ export default function App() {
   const closeForm = () => {
     setShowForm(false)
     setEditingId(undefined)
-    setForm({ name: '', description: '', ai: '', est: '', budget: '' })
+    setForm({ ...EMPTY_FORM, color: '#888888' })
   }
 
   const focus = (id: string) => {
@@ -606,7 +609,7 @@ export default function App() {
             <button
               title="Construct Project"
               aria-label="Construct Project"
-              onClick={() => { setTool('none'); setRoadMenu(false); setPlaceError(undefined); setShowForm(true) }}
+              onClick={() => { setTool('none'); setRoadMenu(false); setPlaceError(undefined); setForm({ ...EMPTY_FORM, color: randomBuildingColor() }); setShowForm(true) }}
               disabled={!!placing}
               className="h-14 w-14 rounded-full bg-amber-500 text-2xl shadow-lg hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
             >🏗️</button>
@@ -661,7 +664,14 @@ export default function App() {
             <form onSubmit={add} className="flex w-full max-w-md flex-col gap-4 rounded-xl border border-slate-600 bg-slate-800 p-5 shadow-2xl">
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-bold">{editingId ? 'Edit project' : 'Construct a project'}</h2>
-                <button type="button" onClick={closeForm} className="text-xl text-slate-400 hover:text-white" aria-label="Close">✕</button>
+                <div className="flex items-center gap-2">
+                  <label className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded border border-slate-500 hover:border-amber-400" title="Building color" aria-label="Building color">
+                    <span aria-hidden="true">🎨</span>
+                    <span className="absolute -bottom-1 -right-1 h-3 w-3 rounded-full border border-white" style={{ background: form.color }} />
+                    <input type="color" className="absolute inset-0 h-full w-full cursor-pointer opacity-0" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} />
+                  </label>
+                  <button type="button" onClick={closeForm} className="text-xl text-slate-400 hover:text-white" aria-label="Close">✕</button>
+                </div>
               </div>
               <label className="flex flex-col gap-1 text-sm">
                 Project name
