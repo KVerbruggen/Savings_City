@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  type Project, dataService, roadService, timeSaved, timeSavingsRatio,
+  type Project, type Settings, DEFAULT_SETTINGS, loadSettings, saveSettings, normalizeSettings, dataService, roadService, timeSaved, timeSavingsRatio,
 } from './services/storageService'
 import {
   type Camera, type Facing, type Footprint, type Placed, type Preview, type Traffic,
   buildingColor, randomBuildingColor, centerOn, formatRemaining, progressOf, edgeRun, finalHeight, footprint, frontEdges, layout, makeCars, nearestEdge, pick,
-  placementAt, placementError, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
+  placementAt, placementError, setSettings, render, roadError, roadsToAdd, roadsToDeleteWithOrphans, roadsToPrune, screenToMap, toIso,
 } from './engine'
 
 type Tool = 'none' | 'road' | 'delete'
@@ -32,6 +32,10 @@ interface Placing {
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([])
+  const [settings, setSettingsState] = useState<Settings>(loadSettings)
+  const [showSettings, setShowSettings] = useState(false)
+  setSettings(settings)
+  const updateSettings = (next: Settings) => { const n = normalizeSettings(next); saveSettings(n); setSettingsState(n) }
   const [form, setForm] = useState({ ...EMPTY_FORM, color: '#888888' })
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string>()
@@ -56,7 +60,7 @@ export default function App() {
   // oxlint-disable-next-line refs -- layout() only reads the map at call time; startsVersion re-triggers it after a mutation
   const placed = useMemo(() => layout(projects, constructionStartsRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startsVersion intentionally invalidates this memo
-    [projects, startsVersion])
+    [projects, startsVersion, settings])
   const [nowTick, setNowTick] = useState(0)
   useEffect(() => {
     const id = setInterval(() => setNowTick(performance.now()), 250)
@@ -548,7 +552,38 @@ export default function App() {
             onPointerDown={() => { if (smoothRotation()) buttonRot.current = -1 }} onPointerUp={() => { buttonRot.current = 0 }}
             onPointerLeave={() => { buttonRot.current = 0 }} onPointerCancel={() => { buttonRot.current = 0 }} aria-label="Rotate view right">↻</button>
           <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => (camRef.current = { ...HOME })} aria-label="Recenter">⌖</button>
+          <button className="h-8 w-8 rounded bg-slate-800/90" onClick={() => setShowSettings((v) => !v)} aria-label="Settings" title="Settings">⚙</button>
         </div>
+        {showSettings && (
+          <div className="absolute right-14 top-3 w-72 rounded-lg bg-slate-900/95 p-3 text-xs text-slate-200 shadow-lg">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm font-semibold">Settings</span>
+              <button type="button" aria-label="Close settings" className="text-slate-400 hover:text-white" onClick={() => setShowSettings(false)}>✕</button>
+            </div>
+            <div className="mb-1 uppercase text-slate-400">Max floors by shortest side</div>
+            {[1, 2, 3, 4, 5].map((w) => (
+              <label key={w} className="mb-1 flex items-center justify-between">
+                {w}-wide
+                <input type="number" min={1} max={500} step={1} value={settings.maxFloorsByWidth[w]}
+                  onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, maxFloorsByWidth: { ...settings.maxFloorsByWidth, [w]: Number(e.target.value) } })}
+                  className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+              </label>
+            ))}
+            <label className="mt-2 flex items-center justify-between" title="Exponent on estimated hours / 1000. Below 1 = steep start.">
+              Footprint size curve
+              <input type="number" min={0.05} max={10} step={0.01} value={settings.footprintCurve}
+                onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, footprintCurve: Number(e.target.value) })}
+                className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+            </label>
+            <label className="mt-1 flex items-center justify-between" title="Exponent on fraction of time saved. 1 = linear.">
+              Height curve
+              <input type="number" min={0.05} max={10} step={0.01} value={settings.heightCurve}
+                onChange={(e) => e.target.value !== '' && updateSettings({ ...settings, heightCurve: Number(e.target.value) })}
+                className="w-20 rounded bg-slate-800 px-2 py-1 text-right" />
+            </label>
+            <button type="button" className="mt-3 rounded border border-slate-500 px-3 py-1 hover:bg-slate-700" onClick={() => updateSettings(DEFAULT_SETTINGS)}>Reset to defaults</button>
+          </div>
+        )}
         <div className="absolute bottom-4 left-4 flex flex-col items-start gap-3">
           {roadMenu && !placing && tool !== 'none' && (
             <p className="w-64 rounded-lg bg-slate-900/90 px-3 py-2 text-xs text-slate-300 shadow-lg">
