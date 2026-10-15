@@ -61,25 +61,33 @@ export const floorsOf = (p: Project) => {
 }
 
 const orientCache = new WeakMap<Footprint, Footprint[]>()
-/** L-shapes turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. Rectangles are unchanged. */
+/** Footprints turn with the door: facing 2 is the base shape, each further step is a quarter turn clockwise. */
 export const orient = (fp: Footprint, facing: Facing): Footprint => {
+  if (fp === null || typeof fp !== 'object') return fp
   const base = fp.base ?? fp
-  if (!base.notch) return base
   let list = orientCache.get(base)
-  if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({ ...base, rot: r, base })))
+  if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({
+    ...base, w: r % 2 ? base.d : base.w, d: r % 2 ? base.w : base.d, rot: r, base,
+  })))
   return list[facing]
 }
 
 const turnPoint = (fp: Footprint, [x, y]: V2): V2 => {
-  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [fp.w - y, x]
+  const base = fp.base ?? fp
+  let w = base.w, d = base.d
+  for (let k = 0; k < (fp.rot ?? 0); k++) {
+    [x, y] = [d - y, x]
+    ;[w, d] = [d, w]
+  }
   return [x, y]
 }
 
 /** Rectangles (x, y, w, d in the local frame) covering the footprint, inset by m on every outer side. Two parts abut along a shared plane. */
 export const footprintRects = (fp: Footprint, m = 0): [number, number, number, number][] => {
   if (!fp.notch) return [[m, m, fp.w - 2 * m, fp.d - 2 * m]]
-  const [b, a] = fp.notch
-  const rects: [number, number, number, number][] = [[m, m, fp.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, fp.d - a]]
+  const base = fp.base ?? fp
+  const [b, a] = base.notch!
+  const rects: [number, number, number, number][] = [[m, m, base.w - 2 * m, a - 2 * m], [m, a - m, b - 2 * m, base.d - a]]
   return rects.map(([x, y, w, d]) => {
     const p = turnPoint(fp, [x, y]), q = turnPoint(fp, [x + w, y + d])
     return [Math.min(p[0], q[0]), Math.min(p[1], q[1]), Math.abs(q[0] - p[0]), Math.abs(q[1] - p[1])]
@@ -88,17 +96,22 @@ export const footprintRects = (fp: Footprint, m = 0): [number, number, number, n
 
 /** Outline of the footprint inset by m, clockwise in map space. */
 export const footprintOutline = (fp: Footprint, m = 0): V2[] => {
-  const { w, d } = fp
-  if (!fp.notch) return [[m, m], [w - m, m], [w - m, d - m], [m, d - m]]
-  const [b, a] = fp.notch
-  const pts: V2[] = [[m, m], [w - m, m], [w - m, a - m], [b - m, a - m], [b - m, d - m], [m, d - m]]
+  if (!fp.notch) return [[m, m], [fp.w - m, m], [fp.w - m, fp.d - m], [m, fp.d - m]]
+  const base = fp.base ?? fp
+  const [b, a] = base.notch!
+  const pts: V2[] = [[m, m], [base.w - m, m], [base.w - m, a - m], [b - m, a - m], [b - m, base.d - m], [m, base.d - m]]
   return pts.map((q) => turnPoint(fp, q))
 }
 
 export const hasCell = (fp: Footprint, x: number, y: number) => {
   if (x < 0 || y < 0 || x >= fp.w || y >= fp.d) return false
-  for (let k = 0; k < (fp.rot ?? 0); k++) [x, y] = [y, fp.w - 1 - x]
-  return !(fp.notch && x >= fp.notch[0] && y >= fp.notch[1])
+  let w = fp.w, d = fp.d
+  for (let k = 0; k < (fp.rot ?? 0); k++) {
+    [x, y] = [y, w - 1 - x]
+    ;[w, d] = [d, w]
+  }
+  const base = fp.base ?? fp
+  return !(base.notch && x >= base.notch[0] && y >= base.notch[1])
 }
 
 /** Occupied cells (local frame). */
@@ -106,6 +119,10 @@ const cellsOf = (fp: Footprint): V2[] => {
   const out: V2[] = []
   for (let x = 0; x < fp.w; x++) for (let y = 0; y < fp.d; y++) if (hasCell(fp, x, y)) out.push([x, y])
   return out
+}
+const footprintCellCount = (fp: Footprint) => {
+  const base = fp.base ?? fp
+  return base.w * base.d - (base.notch ? (base.w - base.notch[0]) * (base.d - base.notch[1]) : 0)
 }
 
 /* ---------------- vector helpers ---------------- */
@@ -455,7 +472,7 @@ function prism(ctx: Ctx, A: V2, B: V2, C: V2, D: V2, height: number, color: stri
       ctx.beginPath()
       for (let r = 0; r < rows; r++) {
         for (let k = 0; k < cols; k++) {
-          const t = ws < 1 ? (dx >= 0 ? 0.42 : 0.58) - 2.5 / length : (k + 0.3) / cols
+          const t = cols === 1 ? 0.5 : (k + 0.3) / cols
           const x = from.x + dx * t, y = from.y + dy * t - z0 - base - r * 12
           ctx.moveTo(x, y); ctx.lineTo(x + wx, y + wy); ctx.lineTo(x + wx, y + wy - 6.5 * ws); ctx.lineTo(x, y - 6.5 * ws); ctx.closePath()
         }
@@ -652,7 +669,9 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const narrow = baseWidth(fp) === 1
   const innerW = fp.w - 2 * m, innerD = fp.d - 2 * m
   const wall: [V2, V2][] = [0, 1, 2, 3].map((f) => frontWall(fp, f as Facing, m).map((q) => at(q[0], q[1])) as [V2, V2])
-  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: narrow ? 0.75 : 1, noWindowsOn: narrow ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
+  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: narrow ? 0.75 : 1, noWindowsOn: narrow
+    ? fp.notch ? [wall[b.facing]] : [wall[b.facing], wall[(b.facing + 2) % 4]]
+    : undefined })
   drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 0, 1, narrow ? win : undefined)
   if (!narrow) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
   // Put bands on the facade before the roof so they cannot paint over its lower half.
@@ -1230,7 +1249,7 @@ export function render(ctx: Ctx, w: number, h: number, s: RenderState) {
   const items: { b: Placed; crane: boolean; depth: number }[] = []
   for (const b of s.placed) {
     items.push({ b, crane: false, depth: viewDepth(b, s.cam.angle) })
-    if ((b.fp.w > 1 || b.fp.d > 1) && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
+    if (footprintCellCount(b.fp) > 3 && progressOf(b, s.elapsed) < 1) items.push({ b, crane: true, depth: craneDepth(b, s.cam.angle) })
   }
   items.sort((a, c) => a.depth - c.depth || a.b.gx - c.b.gx || Number(a.crane) - Number(c.crane))
   for (const { b, crane } of items) {
