@@ -66,7 +66,7 @@ export const orient = (fp: Footprint, facing: Facing): Footprint => {
   if (!base.notch) return base
   let list = orientCache.get(base)
   if (!list) orientCache.set(base, list = [0, 1, 2, 3].map((r) => ({ ...base, rot: r, base })))
-  return list[(facing + 2) % 4]
+  return list[facing]
 }
 
 const turnPoint = (fp: Footprint, [x, y]: V2): V2 => {
@@ -600,6 +600,33 @@ function bodyAt(ctx: Ctx, at: Frame, fp: Footprint, m: number, height: number, c
   for (const [x, y, w, d] of rects) boxAt(ctx, at, x, y, w, d, height, color, opts)
 }
 
+const baseWidth = (fp: Footprint) => fp.notch
+  ? Math.min(fp.notch[0], fp.notch[1], fp.w - fp.notch[0], fp.d - fp.notch[1])
+  : Math.min(fp.w, fp.d)
+
+function drawGableRoof(ctx: Ctx, at: Frame, rect: [number, number, number, number], height: number, roofH: number) {
+  const [x, y, w, d] = rect
+  const alongX = w >= d
+  const start = alongX ? at(x, y + d / 2) : at(x + w / 2, y)
+  const end = alongX ? at(x + w, y + d / 2) : at(x + w / 2, y + d)
+  const eaves: [V2, V2, V2, V2] = [at(x, y), at(x + w, y), at(x + w, y + d), at(x, y + d)]
+  const point = (q: V2, z: number) => {
+    const p = toIso(q[0], q[1])
+    return [p.x, p.y - z] as [number, number]
+  }
+  const ridgeStart = point(start, height + roofH), ridgeEnd = point(end, height + roofH)
+  const base = eaves.map((q) => point(q, height))
+  poly(ctx, [base[0], base[1], ridgeEnd, ridgeStart], '#9fe3ff')
+  poly(ctx, [ridgeStart, ridgeEnd, base[2], base[3]], shade('#9fe3ff', 0.9))
+  if (alongX) {
+    poly(ctx, [base[0], ridgeStart, base[3]], shade('#9fe3ff', 0.82))
+    poly(ctx, [ridgeEnd, base[1], base[2]], shade('#9fe3ff', 1.05))
+  } else {
+    poly(ctx, [base[0], base[1], ridgeStart], shade('#9fe3ff', 0.82))
+    poly(ctx, [ridgeEnd, base[2], base[3]], shade('#9fe3ff', 1.05))
+  }
+}
+
 function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const { p, fp } = b
   const at = frameOf(b)
@@ -608,15 +635,16 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
   const win = rich ? '#ffe36b' : '#d8f4ff'
   const m = BUILDING_MARGIN
   const single = fp.w === 1 && fp.d === 1
+  const narrow = baseWidth(fp) === 1
   const innerW = fp.w - 2 * m, innerD = fp.d - 2 * m
   const wall: [V2, V2][] = [0, 1, 2, 3].map((f) => frontWall(fp, f as Facing, m).map((q) => at(q[0], q[1])) as [V2, V2])
-  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: single ? 0.75 : 1, noWindowsOn: single ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
-  drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 0, 1, single ? win : undefined)
-  if (!single) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
+  bodyAt(ctx, at, fp, m, h, color, { windows: win, windowScale: narrow ? 0.75 : 1, noWindowsOn: narrow ? [wall[b.facing], wall[(b.facing + 2) % 4]] : undefined })
+  drawDoor(ctx, b.gx, b.gy, fp, b.facing, m, 0, 1, narrow ? win : undefined)
+  if (!narrow) drawSign(ctx, wall[b.facing][0], wall[b.facing][1], NORMALS[b.facing], h, p.name, '#e6b422')
   // Put bands on the facade before the roof so they cannot paint over its lower half.
   if (mid || rich) bodyAt(ctx, at, fp, m - 0.03, 3, '#e6b422', { z0: Math.max(0, h - 3) })
   const block = !fp.notch && Math.min(fp.w, fp.d) >= 3
-  const roofH = single ? 8 : block ? 14 : 0
+  const roofH = narrow ? 8 : block ? 14 : 0
   if (single) {
     const roofColor = '#9fe3ff'
     const pts = [at(m, m), at(1 - m, m), at(1 - m, 1 - m), at(m, 1 - m)].map((q) => toIso(q[0], q[1]))
@@ -627,6 +655,8 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
       poly(ctx, [[pts[i].x, pts[i].y - h], [pts[j].x, pts[j].y - h], [apex.x, apexY]], shade(roofColor, f))
     tri((near + 3) % 4, near, 0.9)
     tri(near, (near + 1) % 4, 1.05)
+  } else if (narrow) {
+    for (const rect of footprintRects(fp, m)) drawGableRoof(ctx, at, rect, h, roofH)
   } else if (block) {
     // roof block in the back-right corner as seen from outside the door
     const n = NORMALS[b.facing]
@@ -638,7 +668,7 @@ function drawFinished(ctx: Ctx, b: Placed, h: number, time: number) {
     boxAt(ctx, at, cx - w / 2, cy - w / 2, w, w, roofH, roofColor, { z0: h })
   }
   const c = toIso(...at(fp.w / 2, fp.d / 2))
-  const top = single ? h + roofH : h
+  const top = narrow ? h + roofH : h
   if (rich) {
     // helipad
     ctx.beginPath()
